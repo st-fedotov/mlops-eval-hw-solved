@@ -94,28 +94,37 @@ A typical response:
 
 `refused`, `input_category`, `output_verdict` are the monitoring signals — they drive the Prometheus metrics under the hood. `input_category` is `null` for variants without an input classifier; `output_verdict` is `null` for variants without an output validator.
 
-## Choosing a variant at deployment
+## Two deployment modes
 
-Which variant the service runs is chosen at startup time via the `VARIANT` env var (default: `v1`). Each variant in `variants.yaml` fully describes one deployment: main model, system prompt, guardrail architecture.
+The service has two startup paths, selected by env vars.
 
-```bash
-# v2 — positive-list scope + canned refusal string
-VARIANT=v2 uvicorn src.assistant.service:app --reload
+**Dev mode** — pick a variant from `variants.yaml` by name. Fast iteration on prompts and configs.
 
-# v4 — input classifier in front of the main assistant
-VARIANT=v4 uvicorn src.assistant.service:app --reload
-
-# v5 — input classifier + output validator (sandwich)
-VARIANT=v5 uvicorn src.assistant.service:app --reload
-```
-
-Or set it persistently in `.env`:
-
+In `.env`:
 ```
 VARIANT=v4
 ```
 
-Variant is bound at startup. To switch, stop the service (`Ctrl+C`) and re-run with a different `VARIANT`. There is no hot-swap — intentional, because Prometheus labels (and so the Grafana dashboards) carry `variant_id` as a dimension and a series should belong to one deployment.
+Then:
+```
+uvicorn src.assistant.service:app --reload
+```
+
+**Production mode** — point at an evaluated MLflow run. The service fetches the deployment manifest (variant config + all prompts inlined as strings) from MLflow at startup; the local `variants.yaml` is ignored entirely.
+
+In `.env`:
+```
+MLFLOW_RUN_ID=2e34b4b3d156479f92d740147562443a
+```
+
+Then:
+```
+uvicorn src.assistant.service:app
+```
+
+The point of production mode: a deployment cannot serve a config that wasn't evaluated. Every Prometheus series is labelled with `mlflow_run_id`, so any spike in Grafana is one click away from the MLflow run that authorized the deployment — including its measured accuracy, leakage rate, cost, and the exact prompts that produced them.
+
+Variant is bound at startup. To switch, restart the service.
 
 ## Running an offline eval
 
@@ -127,7 +136,17 @@ python -m src.eval --variant v1
 python -m src.eval --variant v4 --limit 25
 ```
 
-Each invocation is a new MLflow run. Open the MLflow UI and compare runs side-by-side: per-category accuracy, refusal rates, total cost, latency, full per-example predictions as a downloadable artifact.
+Each invocation is a new MLflow run. The run's `variant.json` artifact is the self-contained deployment manifest — the same thing that production mode loads at startup.
+
+## The eval → deploy flow
+
+1. Iterate on `variants.yaml` and prompts in dev mode (`VARIANT=v_new`).
+2. When a variant looks good, run a full eval: `python -m src.eval --variant v_new`.
+3. The eval output prints `run_id: <id>`. Same id is in the MLflow UI.
+4. Review the run's metrics. If it meets your bar (e.g. `accuracy_overall >= 0.9`, `verdict_rate_leaked <= 0.02`, `total_cost_usd <= $X`), set `MLFLOW_RUN_ID=<id>` in the deployment's env file and restart the service.
+5. (Future) The cron'd golden-set replay in `docs/serverless.md` re-runs the same dataset against the deployed run on a schedule. If metrics diverge from the original eval, you've caught upstream drift.
+
+This is the integrity guarantee. `variants.yaml` is a development catalog, not a deployment artifact; the deployment artifact lives in MLflow.
 
 ## UIs
 
@@ -145,9 +164,10 @@ The dev loop:
 
 1. Edit `variants.yaml` — add a new variant block, change a model, swap a guardrail config.
 2. Edit prompts in `prompts/` if you're changing system or classifier prompts.
-3. Stop the service (`Ctrl+C`) and re-run `uvicorn` with the new `VARIANT`.
-4. `python -m src.eval --variant <new>` — new MLflow run.
-5. Compare in MLflow UI; iterate.
+3. Update `VARIANT` in your `.env` to point at the new variant.
+4. Restart the service. (`uvicorn --reload` only reloads source files; the variant is bound by the lifespan on startup, so flipping variants requires a full restart.)
+5. `python -m src.eval --variant <new>` — new MLflow run.
+6. Compare in MLflow UI. When a variant clears your bar, set `MLFLOW_RUN_ID` in the deployment env and promote it via the eval → deploy flow above.
 
 Full task description: [`docs/README.md`](docs/README.md). Reference solution walkthrough: [`docs/reference_solution.md`](docs/reference_solution.md). Serverless v2 sketch: [`docs/serverless.md`](docs/serverless.md).
 

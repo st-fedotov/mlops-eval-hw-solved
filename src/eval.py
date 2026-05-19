@@ -139,13 +139,30 @@ def _confusion_table(rows: list[dict]) -> dict[str, dict[str, int]]:
 
 
 def _log_prompt_artifacts(variant: Variant) -> None:
-    mlflow.log_artifact(str(variant.system_prompt), artifact_path="prompts")
-    g = variant.guardrail
-    if isinstance(g, GuardrailInputClassifier):
-        mlflow.log_artifact(str(g.classifier.prompt), artifact_path="prompts")
-    elif isinstance(g, GuardrailSandwich):
-        mlflow.log_artifact(str(g.input_classifier.prompt), artifact_path="prompts")
-        mlflow.log_artifact(str(g.output_validator.prompt), artifact_path="prompts")
+    """Dump inline prompts as individual files in MLflow for human browsing.
+
+    The same content is also present in `variant.json` (the self-contained
+    deployment manifest); these files exist just to make MLflow UI inspection
+    pleasant.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        d = pathlib.Path(tmpdir)
+        (d / "main_system_prompt.txt").write_text(
+            variant.system_prompt, encoding="utf-8"
+        )
+        g = variant.guardrail
+        if isinstance(g, GuardrailInputClassifier):
+            (d / "input_classifier_prompt.txt").write_text(
+                g.classifier.prompt, encoding="utf-8"
+            )
+        elif isinstance(g, GuardrailSandwich):
+            (d / "input_classifier_prompt.txt").write_text(
+                g.input_classifier.prompt, encoding="utf-8"
+            )
+            (d / "output_validator_prompt.txt").write_text(
+                g.output_validator.prompt, encoding="utf-8"
+            )
+        mlflow.log_artifacts(str(d), artifact_path="prompts")
 
 
 def main() -> None:

@@ -38,7 +38,7 @@ from src.monitoring.metrics import (
     judge_sample_rate,
     llm_api_errors_total,
 )
-from src.variants import load_variant
+from src.variants import load_variant, load_variant_from_mlflow
 
 log = logging.getLogger(__name__)
 
@@ -69,14 +69,34 @@ class ChatResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    variant = load_variant(settings.variant, settings.variants_file)
+
+    # Two paths for resolving the deployment config:
+    # - production: settings.mlflow_run_id is set; fetch the manifest from MLflow.
+    # - dev: load from local variants.yaml.
+    if settings.mlflow_run_id:
+        variant = load_variant_from_mlflow(settings.mlflow_run_id)
+        variant_id = variant.variant_id or settings.mlflow_run_id
+        log.info(
+            "Loaded variant from MLflow run_id=%s (variant_id=%s)",
+            settings.mlflow_run_id,
+            variant_id,
+        )
+    else:
+        variant = load_variant(settings.variant, settings.variants_file)
+        variant_id = settings.variant
+        log.info(
+            "Loaded variant %s from %s (dev mode)",
+            settings.variant,
+            settings.variants_file,
+        )
+
     pipeline = build_pipeline(variant)
 
     assistant_info.labels(
-        variant_id=settings.variant,
+        variant_id=variant_id,
         model=variant.model.name,
-        prompt_file=str(variant.system_prompt),
         guardrail_type=variant.guardrail.type,
+        mlflow_run_id=settings.mlflow_run_id or "local",
     ).set(1)
     judge_sample_rate.set(settings.judge_sample_rate)
 
@@ -87,13 +107,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker_task = asyncio.create_task(worker.run())
 
     app.state.pipeline = pipeline
-    app.state.variant_id = settings.variant
+    app.state.variant_id = variant_id
     app.state.judge_queue = queue
     app.state.judge_sample_rate = settings.judge_sample_rate
 
     log.info(
-        "startup: variant=%s judge_sample_rate=%.3f model=%s guardrail=%s",
-        settings.variant,
+        "startup: variant_id=%s judge_sample_rate=%.3f model=%s guardrail=%s",
+        variant_id,
         settings.judge_sample_rate,
         variant.model.name,
         variant.guardrail.type,

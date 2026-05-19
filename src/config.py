@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # Assistant service
     variant: str = "v1"
     variants_file: Path = Path("variants.yaml")
+    # If set, the service loads its variant from this MLflow run's `variant.json`
+    # artifact instead of from variants_file. Used in deployed environments;
+    # leave unset for local-dev mode.
+    mlflow_run_id: str | None = None
     assistant_host: str = "0.0.0.0"
     assistant_port: int = 8000
 

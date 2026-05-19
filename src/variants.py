@@ -1,14 +1,18 @@
 """Variant configuration — the unit of deployment.
 
-A variant fully describes one assistant: main model + sampling, system prompt,
-and (optional) guardrail architecture. Loaded from variants.yaml; the parsed
-Variant object is the source of truth for both the service and MLflow logging.
+A Variant fully describes one assistant: main model, system prompt (inline
+content, not a file path), and (optional) guardrail architecture.
 
-Run from the repo root so the relative prompt paths resolve.
+Loaded from either:
+- `variants.yaml` (dev): file paths in YAML are resolved to content at load time.
+- An MLflow run artifact (production): the manifest is already self-contained.
+
+The runtime Variant always carries prompts as strings, never as paths.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -26,7 +30,7 @@ class ModelSpec(BaseModel):
 class ClassifierSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: ModelSpec
-    prompt: Path
+    prompt: str  # inline prompt content (NOT a file path)
 
 
 class GuardrailNone(BaseModel):
@@ -55,20 +59,59 @@ Guardrail = Annotated[
 
 class Variant(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    variant_id: str | None = None       # populated by loaders
     display_name: str
     description: str
     model: ModelSpec
-    system_prompt: Path
+    system_prompt: str                  # inline content
     guardrail: Guardrail
 
 
+def _read_prompt(path_str: str, base: Path) -> str:
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = base / p
+    return p.read_text(encoding="utf-8")
+
+
+def _inline_prompts(raw: dict, base: Path) -> dict:
+    """Replace prompt file-path references in a raw variant dict with content."""
+    raw = dict(raw)
+    if "system_prompt" in raw:
+        raw["system_prompt"] = _read_prompt(raw["system_prompt"], base)
+    g = dict(raw.get("guardrail", {}) or {})
+    if g.get("type") == "input_classifier":
+        cls = dict(g["classifier"])
+        cls["prompt"] = _read_prompt(cls["prompt"], base)
+        g["classifier"] = cls
+    elif g.get("type") == "sandwich":
+        ic = dict(g["input_classifier"])
+        ic["prompt"] = _read_prompt(ic["prompt"], base)
+        g["input_classifier"] = ic
+        ov = dict(g["output_validator"])
+        ov["prompt"] = _read_prompt(ov["prompt"], base)
+        g["output_validator"] = ov
+    raw["guardrail"] = g
+    return raw
+
+
 def load_variants(path: Path | str = "variants.yaml") -> dict[str, Variant]:
+    """Load all variants from YAML. Resolves prompt file paths to inline content."""
+    path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return {key: Variant.model_validate(v) for key, v in data.items()}
+    base = path.parent.resolve()
+    result: dict[str, Variant] = {}
+    for vid, raw in data.items():
+        inlined = _inline_prompts(raw, base)
+        inlined.setdefault("variant_id", vid)
+        result[vid] = Variant.model_validate(inlined)
+    return result
 
 
-def load_variant(variant_id: str, path: Path | str = "variants.yaml") -> Variant:
+def load_variant(
+    variant_id: str, path: Path | str = "variants.yaml"
+) -> Variant:
     variants = load_variants(path)
     if variant_id not in variants:
         raise KeyError(
@@ -76,3 +119,20 @@ def load_variant(variant_id: str, path: Path | str = "variants.yaml") -> Variant
             f"Available: {sorted(variants)}"
         )
     return variants[variant_id]
+
+
+def load_variant_from_mlflow(run_id: str) -> Variant:
+    """Fetch the deployment manifest artifact from an MLflow run and reconstruct.
+
+    The artifact `variant.json` is logged by `src.eval`; it's a self-contained
+    serialization of a Variant with all prompts already inlined as strings.
+    No filesystem access is needed at deployment time.
+    """
+    import mlflow  # local import: mlflow is heavy and dev-mode service shouldn't pay for it
+
+    local_path = mlflow.artifacts.download_artifacts(
+        run_id=run_id, artifact_path="variant.json"
+    )
+    with open(local_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return Variant.model_validate(data)

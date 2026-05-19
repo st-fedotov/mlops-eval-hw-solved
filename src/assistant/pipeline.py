@@ -142,17 +142,18 @@ class Pipeline:
 def _classifier_stage(spec: ClassifierSpec, role: str) -> _Stage:
     return _Stage(
         model=spec.model,
-        system_prompt=spec.prompt.read_text(encoding="utf-8"),
+        system_prompt=spec.prompt,
         role=role,
     )
 
 
 def build_pipeline(variant: Variant) -> Pipeline:
-    """Construct a Pipeline from a Variant config. Reads prompt files from disk."""
+    """Construct a Pipeline from a Variant. Prompts are read from variant.system_prompt
+    and variant.guardrail.*.prompt as strings — they were inlined at load time."""
     client = get_client()
     main = _Stage(
         model=variant.model,
-        system_prompt=variant.system_prompt.read_text(encoding="utf-8"),
+        system_prompt=variant.system_prompt,
         role="main_assistant",
     )
 

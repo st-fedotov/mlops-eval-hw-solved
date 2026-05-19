@@ -261,6 +261,9 @@ def main() -> None:
             should_register = args.limit is None
         registered_version: int | None = None
         if should_register:
+            # Lower-level Registry API: create_model_version accepts an arbitrary
+            # `runs:/<id>/<artifact_path>` source. Higher-level
+            # mlflow.register_model expects an MLmodel-format logged model.
             from mlflow.exceptions import MlflowException
             from mlflow.tracking import MlflowClient
 
@@ -269,10 +272,29 @@ def main() -> None:
                 client.get_registered_model(settings.mlflow_registered_model_name)
             except MlflowException:
                 client.create_registered_model(settings.mlflow_registered_model_name)
+
+            # Tag and describe the new version so the Registry UI is informative
+            # at a glance — not just "Version 2".
+            version_tags = {
+                "config_id": config_id,
+                "model": config.model.name,
+                "guardrail_type": config.guardrail.type,
+                "judge_model": settings.judge_model,
+                "dataset_size": str(len(rows_in)),
+            }
+            version_description = (
+                f"Config '{config_id}' "
+                f"(model={config.model.name}, guardrail={config.guardrail.type}). "
+                f"accuracy_overall={metrics['accuracy_overall']:.3f}, "
+                f"verdict_rate_leaked={metrics.get('verdict_rate_leaked', 0.0):.3f}, "
+                f"total_cost_usd=${metrics['total_cost_usd']:.4f}."
+            )
             mv = client.create_model_version(
                 name=settings.mlflow_registered_model_name,
                 source=f"runs:/{run.info.run_id}/config.json",
                 run_id=run.info.run_id,
+                tags=version_tags,
+                description=version_description,
             )
             registered_version = int(mv.version)
             mlflow.set_tag("registered_version", registered_version)

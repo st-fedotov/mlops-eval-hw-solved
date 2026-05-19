@@ -169,9 +169,74 @@ This is the integrity guarantee. The `configs/` directory is a development scrat
 |-----|---------------|
 | http://localhost:5000 | MLflow tracking server — compare eval runs across configs |
 | http://localhost:3000 | Grafana — the *Travel Assistant — Live Monitoring* dashboard (anonymous Viewer; admin/admin to edit) |
-| http://localhost:9090 | Prometheus — raw metrics + PromQL query UI |
 | http://localhost:8000/metrics | Prometheus exposition straight from the assistant service |
 | http://localhost:8000/health | Liveness check |
+
+(The Prometheus server itself runs in the compose stack at `localhost:9090` as Grafana's datasource. You usually won't open it directly — Grafana is the daily-driver UI.)
+
+## Grafana dashboard — what each panel shows
+
+The *Travel Assistant — Live Monitoring* dashboard has 11 panels. All series are emitted by `/chat` traffic (offline `python -m src.eval` runs do *not* feed Prometheus — they're in-process), and panels stay empty until you send some chat requests.
+
+### Refusal rate by `input_category` (5m rolling)
+
+`sum by (input_category) (rate(chat_requests_total{refused="true"}[5m])) / sum by (input_category) (rate(chat_requests_total[5m]))`
+
+Fraction of `/chat` responses that were canned refusals, sliced by the input's detected category. For v4/v5 you see `travel`, `off_topic`, `suspicious` separately. For v1–v3 (no input classifier) all traffic shows as `unmonitored`. A healthy travel-only deployment has near-zero refusal for `travel` and near-1.0 for `off_topic`/`suspicious`.
+
+### DIVERGENCE: cheap refusal-rate vs judge leakage-rate
+
+Two series on one axis:
+- *Cheap refusal-rate* (5m, 100% of traffic) — fraction of responses that exactly match the canned refusal string. Determined in microseconds by string comparison in the `/chat` handler.
+- *Judge leakage-rate* (1h, sampled) — fraction of *judged* exchanges where the deep judge's verdict is `leaked`.
+
+The two should track each other. When cheap signal says "we refused" but the judge sees real leakage, the assistant is producing partial leaks ("Sure, here's a joke. But I should remind you…") that exact-match misses. That divergence is the alert worth firing in production — it's the entire point of having both a cheap signal and a sampled deep one.
+
+### Request rate by config
+
+`sum by (config_id) (rate(chat_requests_total[5m]))`
+
+Requests per second served, split by which config (v1, v2, …) is running. One series per running config. If you're A/B-ing two configs side-by-side, two series.
+
+### Request latency (p50 / p95 / p99) by config
+
+`histogram_quantile(0.50|0.95|0.99, sum by (le, config_id) (rate(chat_request_duration_seconds_bucket[5m])))`
+
+p50 = typical request, p95 = slow tail, p99 = very slow tail. v4/v5 are slower than v1 because they make extra classifier calls. Sudden p95 spikes usually mean the LLM endpoint is degraded.
+
+### Burn rate $/hour by model
+
+`sum by (model) (rate(chat_cost_usd_total[5m])) * 3600`
+
+Cost rate, in USD per hour, sliced by model. Use to alert on runaway spend and to attribute cost to specific models in a multi-model deployment (e.g., small classifier vs. large main assistant in v4/v5).
+
+### In-flight requests
+
+Current count of `/chat` calls being processed concurrently. Saturation signal — sustained high values mean the assistant is bottlenecked; healthy idle systems oscillate near 0.
+
+### Deep judge queue depth
+
+Pending `(input, response)` pairs waiting for the async judge worker. Should hover near 0. Monotonic growth = judge is falling behind sampled traffic; either reduce `JUDGE_SAMPLE_RATE` or use a faster judge model.
+
+### Judge sample rate
+
+Static gauge showing the configured `JUDGE_SAMPLE_RATE` (e.g., 0.05 = 5% of `/chat` traffic sent to the judge). Useful when reading the *Judge verdicts* and *DIVERGENCE* panels — it tells you how noisy the sampled estimates are.
+
+### Current deployment
+
+Table view of the `assistant_info` info-metric: `config_id`, `model`, `guardrail_type`, `model_name`, `model_alias`, `model_version`. Tells you at a glance what is *actually* serving traffic — especially useful when toggling between dev and production modes.
+
+### Judge verdicts (1h rolling)
+
+`sum by (verdict) (rate(judge_evaluations_total[1h]))`
+
+Rate of each judge verdict. Five possible values: `answered_correctly`, `refused_correctly`, `leaked`, `over_refused`, `judge_error`. The first two are good; `leaked`/`over_refused` are quality regressions; `judge_error` should be ≈0 (high values mean the judge isn't following the structured-output schema). Empty until the async judge worker has actually completed sampled evaluations — set `JUDGE_SAMPLE_RATE=1.0` and send a few `/chat` calls if you want this populated quickly for testing.
+
+### LLM API error rate by `error_type`
+
+`sum by (error_type) (rate(llm_api_errors_total[5m]))`
+
+Operational health. Each exception type (`RateLimitError`, `APITimeoutError`, `APIConnectionError`, …) becomes its own series. Spikes here usually mean the Nebius endpoint is throttling you or having issues; nothing about the config is wrong.
 
 ## Iterating on configs
 

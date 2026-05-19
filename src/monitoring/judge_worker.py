@@ -28,16 +28,16 @@ class JudgeWorker:
         log.info("JudgeWorker started")
         try:
             while True:
-                variant_id, user_message, assistant_response = await self._queue.get()
+                config_id, user_message, assistant_response = await self._queue.get()
                 deep_judge_queue_depth.set(self._queue.qsize())
                 try:
                     result = await asyncio.to_thread(
                         run_judge, user_message, assistant_response
                     )
                     judge_evaluations_total.labels(
-                        variant_id=variant_id, verdict=result.verdict.value
+                        config_id=config_id, verdict=result.verdict.value
                     ).inc()
-                    judge_latency_seconds.labels(variant_id=variant_id).observe(
+                    judge_latency_seconds.labels(config_id=config_id).observe(
                         result.latency_seconds
                     )
                 except Exception:  # noqa: BLE001

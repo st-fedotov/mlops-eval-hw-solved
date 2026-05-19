@@ -48,15 +48,15 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
       "id": 3,
-      "title": "Request rate by variant",
+      "title": "Request rate by config",
       "type": "timeseries",
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "options": {"legend": {"showLegend": true, "placement": "bottom", "displayMode": "list"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (variant_id) (rate(chat_requests_total[5m]))",
-          "legendFormat": "{{variant_id}}"
+          "expr": "sum by (config_id) (rate(chat_requests_total[5m]))",
+          "legendFormat": "{{config_id}}"
         }
       ]
     },
@@ -64,25 +64,25 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 9, "w": 12, "x": 0, "y": 17},
       "id": 4,
-      "title": "Request latency (p50 / p95 / p99) by variant",
+      "title": "Request latency (p50 / p95 / p99) by config",
       "type": "timeseries",
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "options": {"legend": {"showLegend": true, "placement": "bottom", "displayMode": "list"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, variant_id) (rate(chat_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p50 {{variant_id}}"
+          "expr": "histogram_quantile(0.5, sum by (le, config_id) (rate(chat_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 {{config_id}}"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, variant_id) (rate(chat_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95 {{variant_id}}"
+          "expr": "histogram_quantile(0.95, sum by (le, config_id) (rate(chat_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{config_id}}"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, variant_id) (rate(chat_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "p99 {{variant_id}}"
+          "expr": "histogram_quantile(0.99, sum by (le, config_id) (rate(chat_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 {{config_id}}"
         }
       ]
     },

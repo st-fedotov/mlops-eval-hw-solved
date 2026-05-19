@@ -3,13 +3,15 @@
 Runs every example in the eval dataset through the assistant pipeline
 (in-process; does NOT go through the FastAPI service or Prometheus).
 Each (input, response) pair is then sent to the judge. Everything is
-logged to MLflow as a single run.
+logged to MLflow as a single run; on full evals the run is auto-registered
+as a new version of the MLflow Model Registry model `travel-assistant`.
 
 Usage:
-    python -m src.eval                              # variant from settings
-    python -m src.eval --variant v4
-    python -m src.eval --variant v5 --limit 10     # quick check
-    python -m src.eval --variant v4 --dataset data/custom.jsonl
+    python -m src.eval                              # config from settings
+    python -m src.eval --config v4
+    python -m src.eval --config v5 --limit 10      # quick check (not registered)
+    python -m src.eval --config v4 --register      # force registration on a partial eval
+    python -m src.eval --config v4 --no-register   # skip registration on a full eval
 """
 
 from __future__ import annotations
@@ -29,15 +31,15 @@ import mlflow
 from src.assistant import build_pipeline
 from src.assistant.types import AssistantResponse
 from src.config import get_settings
+from src.configs import (
+    AssistantConfig,
+    GuardrailInputClassifier,
+    GuardrailSandwich,
+    load_config,
+)
 from src.constants import cost_usd
 from src.judge import Verdict
 from src.judge import judge as run_judge
-from src.variants import (
-    GuardrailInputClassifier,
-    GuardrailSandwich,
-    Variant,
-    load_variant,
-)
 
 
 def _load_dataset(path: pathlib.Path) -> list[dict]:
@@ -138,19 +140,18 @@ def _confusion_table(rows: list[dict]) -> dict[str, dict[str, int]]:
     return table
 
 
-def _log_prompt_artifacts(variant: Variant) -> None:
+def _log_prompt_artifacts(config: AssistantConfig) -> None:
     """Dump inline prompts as individual files in MLflow for human browsing.
 
-    The same content is also present in `variant.json` (the self-contained
-    deployment manifest); these files exist just to make MLflow UI inspection
-    pleasant.
+    Same content is in `config.json` (the self-contained deployment manifest);
+    these files exist just to make MLflow UI inspection pleasant.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         d = pathlib.Path(tmpdir)
         (d / "main_system_prompt.txt").write_text(
-            variant.system_prompt, encoding="utf-8"
+            config.system_prompt, encoding="utf-8"
         )
-        g = variant.guardrail
+        g = config.guardrail
         if isinstance(g, GuardrailInputClassifier):
             (d / "input_classifier_prompt.txt").write_text(
                 g.classifier.prompt, encoding="utf-8"
@@ -167,16 +168,16 @@ def _log_prompt_artifacts(variant: Variant) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", help="Variant id (default: from settings)")
+    parser.add_argument("--config", help="Config id (default: from settings)")
     parser.add_argument(
         "--dataset",
         default="data/eval_dataset.jsonl",
         help="Path to eval JSONL (default: data/eval_dataset.jsonl)",
     )
     parser.add_argument(
-        "--variants-file",
+        "--configs-dir",
         default=None,
-        help="Path to variants.yaml (default: from settings)",
+        help="Path to configs/ directory (default: from settings)",
     )
     parser.add_argument(
         "--limit", type=int, default=None, help="Limit to first N examples (for dev)"
@@ -194,37 +195,37 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    variant_id = args.variant or settings.variant
-    variants_file = pathlib.Path(args.variants_file or settings.variants_file)
-    variant = load_variant(variant_id, variants_file)
-    pipeline = build_pipeline(variant)
+    config_id = args.config or settings.assistant_config
+    configs_dir = pathlib.Path(args.configs_dir or settings.configs_dir)
+    config = load_config(config_id, configs_dir)
+    pipeline = build_pipeline(config)
 
     dataset_path = pathlib.Path(args.dataset)
     rows_in = _load_dataset(dataset_path)
     if args.limit is not None:
         rows_in = rows_in[: args.limit]
     print(
-        f"Evaluating {len(rows_in)} examples on variant {variant_id!r}.",
+        f"Evaluating {len(rows_in)} examples on config {config_id!r}.",
         file=sys.stderr,
     )
 
     mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
     mlflow.set_experiment(settings.mlflow_experiment_name)
-    run_name = f"{variant_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    run_name = f"{config_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
     with mlflow.start_run(run_name=run_name) as run:
-        mlflow.log_dict(variant.model_dump(mode="json"), "variant.json")
+        mlflow.log_dict(config.model_dump(mode="json"), "config.json")
         mlflow.log_params(
             {
-                "variant_id": variant_id,
-                "model": variant.model.name,
-                "guardrail_type": variant.guardrail.type,
+                "config_id": config_id,
+                "model": config.model.name,
+                "guardrail_type": config.guardrail.type,
                 "judge_model": settings.judge_model,
                 "dataset_path": str(dataset_path),
                 "dataset_size": len(rows_in),
             }
         )
-        _log_prompt_artifacts(variant)
+        _log_prompt_artifacts(config)
 
         start = time.perf_counter()
         results: list[dict] = []
@@ -260,9 +261,6 @@ def main() -> None:
             should_register = args.limit is None
         registered_version: int | None = None
         if should_register:
-            # Use the lower-level Registry API: create_model_version accepts an
-            # arbitrary `runs:/<id>/<artifact_path>` source. Higher-level
-            # mlflow.register_model expects an MLmodel-format logged model.
             from mlflow.exceptions import MlflowException
             from mlflow.tracking import MlflowClient
 
@@ -273,7 +271,7 @@ def main() -> None:
                 client.create_registered_model(settings.mlflow_registered_model_name)
             mv = client.create_model_version(
                 name=settings.mlflow_registered_model_name,
-                source=f"runs:/{run.info.run_id}/variant.json",
+                source=f"runs:/{run.info.run_id}/config.json",
                 run_id=run.info.run_id,
             )
             registered_version = int(mv.version)
@@ -282,7 +280,7 @@ def main() -> None:
                 "registered_model_name", settings.mlflow_registered_model_name
             )
 
-        print(f"\n=== {variant_id} eval summary ===", file=sys.stderr)
+        print(f"\n=== {config_id} eval summary ===", file=sys.stderr)
         print(f"  run_id:              {run.info.run_id}", file=sys.stderr)
         if registered_version is not None:
             print(

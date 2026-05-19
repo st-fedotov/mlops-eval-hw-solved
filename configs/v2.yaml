@@ -1,0 +1,9 @@
+display_name: "Explicit refusal"
+description: "Positive-list scope + canned refusal string."
+model:
+  name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  temperature: 0.0
+  max_tokens: 512
+system_prompt: prompts/v2_explicit_refusal.txt
+guardrail:
+  type: none

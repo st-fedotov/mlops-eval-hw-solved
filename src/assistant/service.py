@@ -5,7 +5,8 @@ Endpoints:
 - GET  /metrics  — Prometheus exposition (mounted ASGI app from prometheus_client).
 - GET  /health   — liveness check.
 
-Lifecycle: on startup, build the pipeline for the configured variant and
+Lifecycle: on startup, resolve the deployment config (either from a local
+file in dev mode or via the MLflow Model Registry alias in production) and
 spawn the async judge worker. On shutdown, cancel the worker.
 """
 
@@ -24,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.assistant import AssistantResponse, build_pipeline
 from src.config import get_settings
+from src.configs import load_config, load_config_from_registry
 from src.constants import cost_usd
 from src.monitoring.judge_worker import JudgeWorker
 from src.monitoring.metrics import (
@@ -38,7 +40,6 @@ from src.monitoring.metrics import (
     judge_sample_rate,
     llm_api_errors_total,
 )
-from src.variants import load_variant, load_variant_from_registry
 
 log = logging.getLogger(__name__)
 
@@ -71,40 +72,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
 
     # Two paths for resolving the deployment config:
-    # - production: settings.assistant_model_alias is set; resolve the alias via
-    #   MLflow Model Registry to a specific version, load that version's manifest.
-    # - dev: load from local variants.yaml.
+    # - production: settings.assistant_model_alias is set; resolve via MLflow
+    #   Model Registry to a specific version, load that version's manifest.
+    # - dev: load from local configs_dir.
     model_name = "local"
     model_alias = "dev"
     model_version: str = "n/a"
     if settings.assistant_model_alias:
-        variant, version = load_variant_from_registry(
+        config, version = load_config_from_registry(
             name=settings.mlflow_registered_model_name,
             alias=settings.assistant_model_alias,
         )
-        variant_id = variant.variant_id or "unknown"
+        config_id = config.config_id or "unknown"
         model_name = settings.mlflow_registered_model_name
         model_alias = settings.assistant_model_alias
         model_version = str(version)
         log.info(
-            "Loaded variant from registry name=%s alias=%s version=%d (variant_id=%s)",
-            model_name, model_alias, version, variant_id,
+            "Loaded config from registry name=%s alias=%s version=%d (config_id=%s)",
+            model_name, model_alias, version, config_id,
         )
     else:
-        variant = load_variant(settings.variant, settings.variants_file)
-        variant_id = settings.variant
+        config = load_config(settings.assistant_config, settings.configs_dir)
+        config_id = settings.assistant_config
         log.info(
-            "Loaded variant %s from %s (dev mode)",
-            settings.variant,
-            settings.variants_file,
+            "Loaded config %s from %s (dev mode)",
+            settings.assistant_config,
+            settings.configs_dir,
         )
 
-    pipeline = build_pipeline(variant)
+    pipeline = build_pipeline(config)
 
     assistant_info.labels(
-        variant_id=variant_id,
-        model=variant.model.name,
-        guardrail_type=variant.guardrail.type,
+        config_id=config_id,
+        model=config.model.name,
+        guardrail_type=config.guardrail.type,
         model_name=model_name,
         model_alias=model_alias,
         model_version=model_version,
@@ -118,16 +119,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker_task = asyncio.create_task(worker.run())
 
     app.state.pipeline = pipeline
-    app.state.variant_id = variant_id
+    app.state.config_id = config_id
     app.state.judge_queue = queue
     app.state.judge_sample_rate = settings.judge_sample_rate
 
     log.info(
-        "startup: variant_id=%s judge_sample_rate=%.3f model=%s guardrail=%s",
-        variant_id,
+        "startup: config_id=%s judge_sample_rate=%.3f model=%s guardrail=%s",
+        config_id,
         settings.judge_sample_rate,
-        variant.model.name,
-        variant.guardrail.type,
+        config.model.name,
+        config.guardrail.type,
     )
     try:
         yield
@@ -150,7 +151,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    variant_id = app.state.variant_id
+    config_id = app.state.config_id
     pipeline = app.state.pipeline
     judge_queue: asyncio.Queue = app.state.judge_queue
     sample_rate: float = app.state.judge_sample_rate
@@ -164,23 +165,23 @@ async def chat(req: ChatRequest) -> ChatResponse:
             )
         except Exception as exc:  # noqa: BLE001
             llm_api_errors_total.labels(
-                variant_id=variant_id, error_type=type(exc).__name__
+                config_id=config_id, error_type=type(exc).__name__
             ).inc()
             raise
 
         for call in response.model_calls:
             chat_input_tokens.labels(
-                variant_id=variant_id, model=call.model
+                config_id=config_id, model=call.model
             ).observe(call.input_tokens)
             chat_output_tokens.labels(
-                variant_id=variant_id, model=call.model
+                config_id=config_id, model=call.model
             ).observe(call.output_tokens)
             chat_cost_usd_total.labels(
-                variant_id=variant_id, model=call.model
+                config_id=config_id, model=call.model
             ).inc(cost_usd(call.model, call.input_tokens, call.output_tokens))
 
         chat_requests_total.labels(
-            variant_id=variant_id,
+            config_id=config_id,
             refused=str(response.refused).lower(),
             input_category=response.input_category or "unmonitored",
         ).inc()
@@ -188,7 +189,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         # Sample into the deep-judge queue (non-blocking).
         if random.random() < sample_rate:
             try:
-                judge_queue.put_nowait((variant_id, req.message, response.text))
+                judge_queue.put_nowait((config_id, req.message, response.text))
                 deep_judge_queue_depth.set(judge_queue.qsize())
             except asyncio.QueueFull:
                 # Drop on overflow. Add a dedicated counter if drops become
@@ -212,7 +213,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             ],
         )
     finally:
-        chat_request_duration_seconds.labels(variant_id=variant_id).observe(
+        chat_request_duration_seconds.labels(config_id=config_id).observe(
             time.perf_counter() - start
         )
         in_flight_requests.dec()

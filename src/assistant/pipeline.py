@@ -5,9 +5,9 @@ A request goes through up to three model calls:
     2. Main assistant.
     3. Optional output validator (replaces output with canned refusal if it leaked).
 
-The variant's guardrail field controls which optional stages are present.
-The response carries one ModelCall per stage executed, for downstream
-Prometheus metrics and MLflow logging.
+The AssistantConfig's guardrail field controls which optional stages are
+present. The response carries one ModelCall per stage executed, for
+downstream Prometheus metrics and MLflow logging.
 """
 
 from __future__ import annotations
@@ -18,15 +18,15 @@ from dataclasses import dataclass
 from openai import OpenAI
 
 from src.assistant.types import AssistantResponse, ModelCall
-from src.constants import CANNED_REFUSAL
-from src.nebius_client import get_client
-from src.variants import (
+from src.configs import (
+    AssistantConfig,
     ClassifierSpec,
     GuardrailInputClassifier,
     GuardrailSandwich,
     ModelSpec,
-    Variant,
 )
+from src.constants import CANNED_REFUSAL
+from src.nebius_client import get_client
 
 
 @dataclass(frozen=True)
@@ -65,7 +65,7 @@ def _parse_input_category(raw: str) -> str:
     for label in ("travel", "off_topic", "suspicious"):
         if cleaned == label or cleaned.startswith(label):
             return label
-    return "suspicious"  # fail-closed: unparseable → treat as suspicious
+    return "suspicious"  # fail-closed: unparseable -> treat as suspicious
 
 
 def _parse_output_verdict(raw: str) -> str:
@@ -73,7 +73,7 @@ def _parse_output_verdict(raw: str) -> str:
     for label in ("ok", "leaked"):
         if cleaned == label or cleaned.startswith(label):
             return label
-    return "leaked"  # fail-closed: unparseable → treat as leaked
+    return "leaked"  # fail-closed: unparseable -> treat as leaked
 
 
 class Pipeline:
@@ -147,17 +147,18 @@ def _classifier_stage(spec: ClassifierSpec, role: str) -> _Stage:
     )
 
 
-def build_pipeline(variant: Variant) -> Pipeline:
-    """Construct a Pipeline from a Variant. Prompts are read from variant.system_prompt
-    and variant.guardrail.*.prompt as strings — they were inlined at load time."""
+def build_pipeline(config: AssistantConfig) -> Pipeline:
+    """Construct a Pipeline from an AssistantConfig. Prompts are taken from
+    config.system_prompt and config.guardrail.*.prompt as strings — they
+    were inlined at load time."""
     client = get_client()
     main = _Stage(
-        model=variant.model,
-        system_prompt=variant.system_prompt,
+        model=config.model,
+        system_prompt=config.system_prompt,
         role="main_assistant",
     )
 
-    g = variant.guardrail
+    g = config.guardrail
     input_classifier: _Stage | None = None
     output_validator: _Stage | None = None
 

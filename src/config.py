@@ -29,21 +29,21 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "http://localhost:5000"
     mlflow_experiment_name: str = "travel-assistant"
 
-    # Assistant service
-    variant: str = "v1"
-    variants_file: Path = Path("variants.yaml")
+    # Assistant service — dev mode loads a config by id from configs_dir.
+    assistant_config: str = "v1"
+    configs_dir: Path = Path("configs")
     assistant_host: str = "0.0.0.0"
     assistant_port: int = 8000
 
     # MLflow Model Registry — production deployment shape.
     # The eval CLI auto-registers full evals under `mlflow_registered_model_name`
     # as new versions. When `assistant_model_alias` is set, the service loads
-    # its variant from the version that alias currently points at. Unset alias
-    # = local-dev mode (loads from variants_file).
+    # its config from the version that alias currently points at. Unset alias
+    # = local-dev mode (loads from configs_dir).
     mlflow_registered_model_name: str = "travel-assistant"
     assistant_model_alias: str | None = None
 
-    # Judge — orthogonal to assistant variants
+    # Judge — orthogonal to assistant configs
     judge_model: str = "meta-llama/Llama-3.3-70B-Instruct"
     judge_temperature: float = 0.0
     judge_sample_rate: float = Field(0.05, ge=0.0, le=1.0)

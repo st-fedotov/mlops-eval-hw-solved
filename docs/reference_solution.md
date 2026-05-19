@@ -1,10 +1,10 @@
 # Reference solution — walkthrough
 
-The reference iteration path and what each variant teaches. Students aren't expected to reproduce it exactly, but the lessons should match.
+The reference iteration path and what each config teaches. Students aren't expected to reproduce it exactly, but the lessons should match.
 
 ## The path
 
-Each variant is a configured deployment in `variants.yaml`: main model, system prompt, optional guardrail architecture. Each eval against the dataset is one MLflow run.
+Each config is a YAML file in `configs/`: main model, system prompt, optional guardrail architecture. The filename stem is the `config_id`. Each eval against the dataset is one MLflow run; on full evals the run is auto-registered as a new version of `travel-assistant` in the MLflow Model Registry. Promotion (assigning the `Production` alias to a version) is a deliberate, audited step — promotion gates the deployment, not the eval.
 
 ### v1 — minimal baseline
 
@@ -66,7 +66,7 @@ Defense in depth. v4's gate plus a cheap *output validator* after the main assis
 
 The validator catches the residual case: classifier mis-labeled the input as travel, the main assistant got jailbroken, the validator notices the output is off-topic. Cost: one more classifier call per request that passed the gate.
 
-Expected lift: highest accuracy across all four categories. Highest cost. The variant students should benchmark against.
+Expected lift: highest accuracy across all four categories. Highest cost. The config students should benchmark against.
 
 ## How to read the MLflow comparison
 
@@ -76,6 +76,12 @@ Expected lift: highest accuracy across all four categories. Highest cost. The va
 - **v4 → v5:** smaller but meaningful lift on adversarial, slight cost increase. Defense in depth.
 
 The slope of *accuracy gain per dollar spent* is decreasing — that's the cost frontier students should plot once they have all five runs.
+
+## Registry-rooted deployment
+
+Each of v1–v5 produces an MLflow Registry version when run as a full eval. The Registry view becomes the canonical comparison surface: each version row carries its accuracy, cost, and a link to the source run with its full prompt artifacts. Promotion to `Production` (via alias assignment) is the only path to a live deployment — there's no way to ship a config that hasn't gone through eval. Rollback to the previous version is one alias-update plus a service restart.
+
+The `configs/` directory on disk is a *development scratchpad* — useful for iteration, but not load-bearing. Once a version is registered, the `configs/` file that produced it can be edited or even deleted without affecting the deployed system, because the Registry version's `config.json` artifact is a self-contained manifest with all prompts inlined as strings.
 
 ## What about online monitoring?
 

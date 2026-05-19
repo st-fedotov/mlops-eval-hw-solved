@@ -181,6 +181,16 @@ def main() -> None:
     parser.add_argument(
         "--limit", type=int, default=None, help="Limit to first N examples (for dev)"
     )
+    parser.add_argument(
+        "--register",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Register the run as a new version of the MLflow Registry model. "
+            "Default: register only on full eval (no --limit); use --register / "
+            "--no-register to override either way."
+        ),
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -241,19 +251,58 @@ def main() -> None:
                     f.write(json.dumps(r) + "\n")
             mlflow.log_artifact(str(preds_path), artifact_path="predictions")
 
+        # Registry registration. Auto on full eval; explicit override via flag.
+        if args.register is True:
+            should_register = True
+        elif args.register is False:
+            should_register = False
+        else:
+            should_register = args.limit is None
+        registered_version: int | None = None
+        if should_register:
+            # Use the lower-level Registry API: create_model_version accepts an
+            # arbitrary `runs:/<id>/<artifact_path>` source. Higher-level
+            # mlflow.register_model expects an MLmodel-format logged model.
+            from mlflow.exceptions import MlflowException
+            from mlflow.tracking import MlflowClient
+
+            client = MlflowClient()
+            try:
+                client.get_registered_model(settings.mlflow_registered_model_name)
+            except MlflowException:
+                client.create_registered_model(settings.mlflow_registered_model_name)
+            mv = client.create_model_version(
+                name=settings.mlflow_registered_model_name,
+                source=f"runs:/{run.info.run_id}/variant.json",
+                run_id=run.info.run_id,
+            )
+            registered_version = int(mv.version)
+            mlflow.set_tag("registered_version", registered_version)
+            mlflow.set_tag(
+                "registered_model_name", settings.mlflow_registered_model_name
+            )
+
         print(f"\n=== {variant_id} eval summary ===", file=sys.stderr)
-        print(f"  run_id:           {run.info.run_id}", file=sys.stderr)
-        print(f"  accuracy_overall: {metrics['accuracy_overall']:.3f}", file=sys.stderr)
+        print(f"  run_id:              {run.info.run_id}", file=sys.stderr)
+        if registered_version is not None:
+            print(
+                f"  registered:          "
+                f"{settings.mlflow_registered_model_name} v{registered_version}",
+                file=sys.stderr,
+            )
+        else:
+            print("  registered:          (skipped)", file=sys.stderr)
+        print(f"  accuracy_overall:    {metrics['accuracy_overall']:.3f}", file=sys.stderr)
         for cat in ("travel", "off_topic", "jailbreak", "social_engineering"):
             key = f"accuracy_{cat}"
             if key in metrics:
                 print(f"  accuracy_{cat:18s}: {metrics[key]:.3f}", file=sys.stderr)
-        print(f"  total_cost_usd:    ${metrics['total_cost_usd']:.4f}", file=sys.stderr)
+        print(f"  total_cost_usd:       ${metrics['total_cost_usd']:.4f}", file=sys.stderr)
         print(
-            f"  avg_latency_s:     {metrics['avg_latency_seconds']:.2f}",
+            f"  avg_latency_s:        {metrics['avg_latency_seconds']:.2f}",
             file=sys.stderr,
         )
-        print(f"  eval_duration_s:   {elapsed:.1f}", file=sys.stderr)
+        print(f"  eval_duration_s:      {elapsed:.1f}", file=sys.stderr)
 
 
 if __name__ == "__main__":

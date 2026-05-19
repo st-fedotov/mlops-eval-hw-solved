@@ -38,7 +38,7 @@ from src.monitoring.metrics import (
     judge_sample_rate,
     llm_api_errors_total,
 )
-from src.variants import load_variant, load_variant_from_mlflow
+from src.variants import load_variant, load_variant_from_registry
 
 log = logging.getLogger(__name__)
 
@@ -71,15 +71,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
 
     # Two paths for resolving the deployment config:
-    # - production: settings.mlflow_run_id is set; fetch the manifest from MLflow.
+    # - production: settings.assistant_model_alias is set; resolve the alias via
+    #   MLflow Model Registry to a specific version, load that version's manifest.
     # - dev: load from local variants.yaml.
-    if settings.mlflow_run_id:
-        variant = load_variant_from_mlflow(settings.mlflow_run_id)
-        variant_id = variant.variant_id or settings.mlflow_run_id
+    model_name = "local"
+    model_alias = "dev"
+    model_version: str = "n/a"
+    if settings.assistant_model_alias:
+        variant, version = load_variant_from_registry(
+            name=settings.mlflow_registered_model_name,
+            alias=settings.assistant_model_alias,
+        )
+        variant_id = variant.variant_id or "unknown"
+        model_name = settings.mlflow_registered_model_name
+        model_alias = settings.assistant_model_alias
+        model_version = str(version)
         log.info(
-            "Loaded variant from MLflow run_id=%s (variant_id=%s)",
-            settings.mlflow_run_id,
-            variant_id,
+            "Loaded variant from registry name=%s alias=%s version=%d (variant_id=%s)",
+            model_name, model_alias, version, variant_id,
         )
     else:
         variant = load_variant(settings.variant, settings.variants_file)
@@ -96,7 +105,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         variant_id=variant_id,
         model=variant.model.name,
         guardrail_type=variant.guardrail.type,
-        mlflow_run_id=settings.mlflow_run_id or "local",
+        model_name=model_name,
+        model_alias=model_alias,
+        model_version=model_version,
     ).set(1)
     judge_sample_rate.set(settings.judge_sample_rate)
 

@@ -110,11 +110,12 @@ Then:
 uvicorn src.assistant.service:app --reload
 ```
 
-**Production mode** — point at an evaluated MLflow run. The service fetches the deployment manifest (variant config + all prompts inlined as strings) from MLflow at startup; the local `variants.yaml` is ignored entirely.
+**Production mode** — point at a *registered* MLflow Model Registry version, resolved by alias. The service queries the Registry, downloads the deployment manifest of the version that the alias currently points at, and runs it. The local `variants.yaml` is ignored entirely.
 
 In `.env`:
 ```
-MLFLOW_RUN_ID=2e34b4b3d156479f92d740147562443a
+MLFLOW_REGISTERED_MODEL_NAME=travel-assistant
+ASSISTANT_MODEL_ALIAS=Production
 ```
 
 Then:
@@ -122,7 +123,7 @@ Then:
 uvicorn src.assistant.service:app
 ```
 
-The point of production mode: a deployment cannot serve a config that wasn't evaluated. Every Prometheus series is labelled with `mlflow_run_id`, so any spike in Grafana is one click away from the MLflow run that authorized the deployment — including its measured accuracy, leakage rate, cost, and the exact prompts that produced them.
+Promotion — which version is `Production` — is an explicit, audited operation in MLflow (see the eval → deploy flow below). Production cannot serve a config that wasn't evaluated, registered, and then promoted by alias assignment. Every Prometheus series is labelled with `model_name`, `model_alias`, and `model_version`, so any spike in Grafana is one click away from the version that authorized the deployment.
 
 Variant is bound at startup. To switch, restart the service.
 
@@ -142,11 +143,18 @@ Each invocation is a new MLflow run. The run's `variant.json` artifact is the se
 
 1. Iterate on `variants.yaml` and prompts in dev mode (`VARIANT=v_new`).
 2. When a variant looks good, run a full eval: `python -m src.eval --variant v_new`.
-3. The eval output prints `run_id: <id>`. Same id is in the MLflow UI.
-4. Review the run's metrics. If it meets your bar (e.g. `accuracy_overall >= 0.9`, `verdict_rate_leaked <= 0.02`, `total_cost_usd <= $X`), set `MLFLOW_RUN_ID=<id>` in the deployment's env file and restart the service.
-5. (Future) The cron'd golden-set replay in `docs/serverless.md` re-runs the same dataset against the deployed run on a schedule. If metrics diverge from the original eval, you've caught upstream drift.
+3. The eval auto-registers the result as a new version of `travel-assistant` and prints `registered: travel-assistant vN`. The same version is visible in the MLflow UI under Models.
+4. Review version N's metrics. If it meets your bar (e.g. `accuracy_overall >= 0.9`, `verdict_rate_leaked <= 0.02`, `total_cost_usd <= $X`), **promote** it by assigning the `Production` alias:
+   ```
+   mlflow models set-alias travel-assistant Production N
+   ```
+   Or via UI: open version N → *Set alias* → `Production`.
+5. Restart the service. It re-resolves the alias and picks up the new version.
+6. (Future) The cron'd golden-set replay in `docs/serverless.md` re-runs the same dataset against the deployed version on a schedule. If metrics diverge from the original eval, you've caught upstream drift.
 
-This is the integrity guarantee. `variants.yaml` is a development catalog, not a deployment artifact; the deployment artifact lives in MLflow.
+**Rollback** is one alias update plus a restart: `mlflow models set-alias travel-assistant Production N-1`. The previous version is a config that *already passed eval*; no risk of shipping something unmeasured.
+
+This is the integrity guarantee. `variants.yaml` is a development catalog, not a deployment artifact. Versions in the Registry are immutable; aliases are mutable but their reassignment is an audited event. The deployment lineage from a Grafana spike runs: `model_name` + `model_alias` + `model_version` label → MLflow version → source run → measured metrics + exact prompts.
 
 ## UIs
 

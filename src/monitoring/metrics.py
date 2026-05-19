@@ -74,7 +74,14 @@ judge_sample_rate = Gauge(
 assistant_info = Gauge(
     "assistant_info",
     "Info metric carrying deployment identity in labels. Always 1.",
-    ["variant_id", "model", "guardrail_type", "mlflow_run_id"],
+    [
+        "variant_id",
+        "model",
+        "guardrail_type",
+        "model_name",       # MLflow registered model name; "local" in dev mode
+        "model_alias",      # which Registry alias the service resolved; "dev" in dev mode
+        "model_version",    # registered version number; "n/a" in dev mode
+    ],
 )
 
 # --- Sampled signals (async worker emits) ------------------------------------

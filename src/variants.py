@@ -122,11 +122,10 @@ def load_variant(
 
 
 def load_variant_from_mlflow(run_id: str) -> Variant:
-    """Fetch the deployment manifest artifact from an MLflow run and reconstruct.
+    """Fetch the deployment manifest artifact from a specific MLflow run.
 
-    The artifact `variant.json` is logged by `src.eval`; it's a self-contained
-    serialization of a Variant with all prompts already inlined as strings.
-    No filesystem access is needed at deployment time.
+    Direct-by-run-id loader, used as a debug utility. Production loads should
+    go through the Model Registry via `load_variant_from_registry`.
     """
     import mlflow  # local import: mlflow is heavy and dev-mode service shouldn't pay for it
 
@@ -136,3 +135,23 @@ def load_variant_from_mlflow(run_id: str) -> Variant:
     with open(local_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return Variant.model_validate(data)
+
+
+def load_variant_from_registry(name: str, alias: str) -> tuple[Variant, int]:
+    """Resolve a Model Registry alias to a Variant.
+
+    Looks up the version that `name`@`alias` currently points at, downloads
+    its `variant.json` artifact (the self-contained deployment manifest), and
+    parses it. Returns the Variant and the resolved version number.
+
+    Raises if the alias is not set on any version of the registered model.
+    """
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient()
+    mv = client.get_model_version_by_alias(name=name, alias=alias)
+    local_path = mlflow.artifacts.download_artifacts(mv.source)
+    with open(local_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return Variant.model_validate(data), int(mv.version)

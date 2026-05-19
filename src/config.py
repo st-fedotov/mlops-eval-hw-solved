@@ -32,12 +32,16 @@ class Settings(BaseSettings):
     # Assistant service
     variant: str = "v1"
     variants_file: Path = Path("variants.yaml")
-    # If set, the service loads its variant from this MLflow run's `variant.json`
-    # artifact instead of from variants_file. Used in deployed environments;
-    # leave unset for local-dev mode.
-    mlflow_run_id: str | None = None
     assistant_host: str = "0.0.0.0"
     assistant_port: int = 8000
+
+    # MLflow Model Registry — production deployment shape.
+    # The eval CLI auto-registers full evals under `mlflow_registered_model_name`
+    # as new versions. When `assistant_model_alias` is set, the service loads
+    # its variant from the version that alias currently points at. Unset alias
+    # = local-dev mode (loads from variants_file).
+    mlflow_registered_model_name: str = "travel-assistant"
+    assistant_model_alias: str | None = None
 
     # Judge — orthogonal to assistant variants
     judge_model: str = "meta-llama/Llama-3.3-70B-Instruct"

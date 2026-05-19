@@ -65,7 +65,9 @@ services:
       - "5000:5000"
 
   prometheus:
-    image: prom/prometheus:latest
+    # Pulled from Quay rather than Docker Hub — Hub's CloudFront edge
+    # is unreliable from some regions. Quay publishes the same image.
+    image: quay.io/prometheus/prometheus:latest
     restart: unless-stopped
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro

@@ -148,6 +148,23 @@ Each invocation is a new MLflow run. On full evals (no `--limit`), the run's `co
 
 ## The eval → deploy flow
 
+### Configs are invisible to MLflow until they're evaluated
+
+A YAML file in `configs/` is just text on disk. MLflow has no awareness of any config you haven't run eval on. Two levels of "seen by MLflow" to distinguish:
+
+- **Logged as a run** — happens on *every* `python -m src.eval` invocation, including partial ones (`--limit 25`). The config goes into the experiment as a `config.json` artifact, along with metrics, predictions, and prompt artifacts. Visible in *Experiments → travel-assistant → list of runs*. Useful for inspection. **Not deployable.**
+- **Registered as a Registry version** — happens on *full* evals (no `--limit`), or when you pass `--register` explicitly. Only registered versions can be promoted via the `Production` alias and resolved by the service in production mode. Partial evals deliberately skip this so dev-loop noise doesn't pollute the Registry.
+
+So for a hypothetical new `configs/v6.yaml`:
+
+| What you ran | Run in experiment? | Version in Registry? | Deployable? |
+|---|---|---|---|
+| Nothing | no | no | no |
+| `python -m src.eval --config v6 --limit 25` | yes | no | no |
+| `python -m src.eval --config v6` (full) | yes | yes | yes (after promotion) |
+
+The local file alone does nothing — eval is the door that lets configs enter MLflow at all.
+
 ### How Registry versions are numbered
 
 Every full `python -m src.eval` invocation auto-creates a new version under the *registered model* `travel-assistant`. Versions are plain integers — `1`, `2`, `3`, … — auto-assigned by MLflow at registration time. You don't choose the number.

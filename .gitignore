@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Env
+.env
+.env.local
+
+# Local API key (do not commit)
+nebius_api_key
+nebius_api_key.*
+mlops-hw-tf-api-key
+mlops-hw-tf-api-key.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# MLflow / local data
+mlruns/
+mlflow.db
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: travel_assistant
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # Assistant runs on the host (uvicorn); reached via the Docker
+          # Desktop / colima alias. Linux users need the host-gateway alias
+          # in docker-compose (already configured).
+          - host.docker.internal:8000
+        labels:
+          service: travel_assistant
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

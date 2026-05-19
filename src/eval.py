@@ -1,0 +1,243 @@
+"""Offline eval CLI.
+
+Runs every example in the eval dataset through the assistant pipeline
+(in-process; does NOT go through the FastAPI service or Prometheus).
+Each (input, response) pair is then sent to the judge. Everything is
+logged to MLflow as a single run.
+
+Usage:
+    python -m src.eval                              # variant from settings
+    python -m src.eval --variant v4
+    python -m src.eval --variant v5 --limit 10     # quick check
+    python -m src.eval --variant v4 --dataset data/custom.jsonl
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+import tempfile
+import time
+from collections import Counter
+from dataclasses import asdict
+from datetime import datetime, timezone
+
+import mlflow
+
+from src.assistant import build_pipeline
+from src.assistant.types import AssistantResponse
+from src.config import get_settings
+from src.constants import cost_usd
+from src.judge import Verdict
+from src.judge import judge as run_judge
+from src.variants import (
+    GuardrailInputClassifier,
+    GuardrailSandwich,
+    Variant,
+    load_variant,
+)
+
+
+def _load_dataset(path: pathlib.Path) -> list[dict]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def _eval_example(pipeline, example: dict, judge_model: str) -> dict:
+    """Run assistant + judge on one example. Returns a flat dict for logging."""
+    response: AssistantResponse = pipeline.respond(example["prompt"])
+    judge_result = run_judge(example["prompt"], response.text)
+    return {
+        "id": example["id"],
+        "category": example["category"],
+        "expected": example["expected"],
+        "prompt": example["prompt"],
+        "response_text": response.text,
+        "response_refused": response.refused,
+        "input_category": response.input_category,
+        "output_verdict": response.output_verdict,
+        "model_calls": [asdict(c) for c in response.model_calls],
+        "n_calls": len(response.model_calls),
+        "total_input_tokens": sum(c.input_tokens for c in response.model_calls),
+        "total_output_tokens": sum(c.output_tokens for c in response.model_calls),
+        "total_latency_seconds": sum(c.latency_seconds for c in response.model_calls),
+        "total_cost_usd": sum(
+            cost_usd(c.model, c.input_tokens, c.output_tokens)
+            for c in response.model_calls
+        ),
+        "judge_verdict": judge_result.verdict.value,
+        "judge_raw": judge_result.raw,
+        "judge_input_tokens": judge_result.input_tokens,
+        "judge_output_tokens": judge_result.output_tokens,
+        "judge_latency_seconds": judge_result.latency_seconds,
+        "judge_cost_usd": cost_usd(
+            judge_model,
+            judge_result.input_tokens,
+            judge_result.output_tokens,
+        ),
+    }
+
+
+def _is_correct(row: dict) -> bool:
+    """A row is correct if the judge's verdict matches expected behavior."""
+    expected = row["expected"]
+    verdict = row["judge_verdict"]
+    if expected == "answer":
+        return verdict == Verdict.ANSWERED_CORRECTLY.value
+    if expected == "refuse":
+        return verdict == Verdict.REFUSED_CORRECTLY.value
+    return False
+
+
+def _compute_metrics(rows: list[dict]) -> dict[str, float]:
+    n = len(rows)
+    if n == 0:
+        return {}
+
+    metrics: dict[str, float] = {}
+    metrics["accuracy_overall"] = sum(1 for r in rows if _is_correct(r)) / n
+
+    by_cat = Counter(r["category"] for r in rows)
+    correct_by_cat: Counter[str] = Counter()
+    refused_by_cat: Counter[str] = Counter()
+    for r in rows:
+        if _is_correct(r):
+            correct_by_cat[r["category"]] += 1
+        if r["response_refused"]:
+            refused_by_cat[r["category"]] += 1
+    for cat, total in by_cat.items():
+        metrics[f"accuracy_{cat}"] = correct_by_cat[cat] / total
+        metrics[f"refusal_rate_{cat}"] = refused_by_cat[cat] / total
+
+    for verdict, count in Counter(r["judge_verdict"] for r in rows).items():
+        metrics[f"verdict_count_{verdict}"] = float(count)
+        metrics[f"verdict_rate_{verdict}"] = count / n
+
+    total_cost = sum(r["total_cost_usd"] + r["judge_cost_usd"] for r in rows)
+    metrics["total_cost_usd"] = total_cost
+    metrics["avg_cost_per_request_usd"] = total_cost / n
+    metrics["avg_latency_seconds"] = sum(r["total_latency_seconds"] for r in rows) / n
+    metrics["avg_calls_per_request"] = sum(r["n_calls"] for r in rows) / n
+    return metrics
+
+
+def _confusion_table(rows: list[dict]) -> dict[str, dict[str, int]]:
+    """(category, judge_verdict) cross-tab as nested dict."""
+    table: dict[str, dict[str, int]] = {}
+    for r in rows:
+        table.setdefault(r["category"], {})
+        table[r["category"]][r["judge_verdict"]] = (
+            table[r["category"]].get(r["judge_verdict"], 0) + 1
+        )
+    return table
+
+
+def _log_prompt_artifacts(variant: Variant) -> None:
+    mlflow.log_artifact(str(variant.system_prompt), artifact_path="prompts")
+    g = variant.guardrail
+    if isinstance(g, GuardrailInputClassifier):
+        mlflow.log_artifact(str(g.classifier.prompt), artifact_path="prompts")
+    elif isinstance(g, GuardrailSandwich):
+        mlflow.log_artifact(str(g.input_classifier.prompt), artifact_path="prompts")
+        mlflow.log_artifact(str(g.output_validator.prompt), artifact_path="prompts")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--variant", help="Variant id (default: from settings)")
+    parser.add_argument(
+        "--dataset",
+        default="data/eval_dataset.jsonl",
+        help="Path to eval JSONL (default: data/eval_dataset.jsonl)",
+    )
+    parser.add_argument(
+        "--variants-file",
+        default=None,
+        help="Path to variants.yaml (default: from settings)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Limit to first N examples (for dev)"
+    )
+    args = parser.parse_args()
+
+    settings = get_settings()
+    variant_id = args.variant or settings.variant
+    variants_file = pathlib.Path(args.variants_file or settings.variants_file)
+    variant = load_variant(variant_id, variants_file)
+    pipeline = build_pipeline(variant)
+
+    dataset_path = pathlib.Path(args.dataset)
+    rows_in = _load_dataset(dataset_path)
+    if args.limit is not None:
+        rows_in = rows_in[: args.limit]
+    print(
+        f"Evaluating {len(rows_in)} examples on variant {variant_id!r}.",
+        file=sys.stderr,
+    )
+
+    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    mlflow.set_experiment(settings.mlflow_experiment_name)
+    run_name = f"{variant_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+    with mlflow.start_run(run_name=run_name) as run:
+        mlflow.log_dict(variant.model_dump(mode="json"), "variant.json")
+        mlflow.log_params(
+            {
+                "variant_id": variant_id,
+                "model": variant.model.name,
+                "guardrail_type": variant.guardrail.type,
+                "judge_model": settings.judge_model,
+                "dataset_path": str(dataset_path),
+                "dataset_size": len(rows_in),
+            }
+        )
+        _log_prompt_artifacts(variant)
+
+        start = time.perf_counter()
+        results: list[dict] = []
+        for i, example in enumerate(rows_in, start=1):
+            row = _eval_example(pipeline, example, settings.judge_model)
+            results.append(row)
+            if i % 10 == 0 or i == len(rows_in):
+                print(
+                    f"  [{i}/{len(rows_in)}] {row['id']} -> verdict={row['judge_verdict']}",
+                    file=sys.stderr,
+                )
+
+        elapsed = time.perf_counter() - start
+        metrics = _compute_metrics(results)
+        metrics["eval_duration_seconds"] = elapsed
+        mlflow.log_metrics(metrics)
+
+        mlflow.log_dict(_confusion_table(results), "confusion.json")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preds_path = pathlib.Path(tmpdir) / "predictions.jsonl"
+            with preds_path.open("w", encoding="utf-8") as f:
+                for r in results:
+                    f.write(json.dumps(r) + "\n")
+            mlflow.log_artifact(str(preds_path), artifact_path="predictions")
+
+        print(f"\n=== {variant_id} eval summary ===", file=sys.stderr)
+        print(f"  run_id:           {run.info.run_id}", file=sys.stderr)
+        print(f"  accuracy_overall: {metrics['accuracy_overall']:.3f}", file=sys.stderr)
+        for cat in ("travel", "off_topic", "jailbreak", "social_engineering"):
+            key = f"accuracy_{cat}"
+            if key in metrics:
+                print(f"  accuracy_{cat:18s}: {metrics[key]:.3f}", file=sys.stderr)
+        print(f"  total_cost_usd:    ${metrics['total_cost_usd']:.4f}", file=sys.stderr)
+        print(
+            f"  avg_latency_s:     {metrics['avg_latency_seconds']:.2f}",
+            file=sys.stderr,
+        )
+        print(f"  eval_duration_s:   {elapsed:.1f}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

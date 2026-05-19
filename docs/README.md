@@ -18,7 +18,7 @@ You're building, evaluating, and operating a *bounded-scope* assistant that shou
 ## What you do
 
 1. `cp .env.example .env`; put your Nebius API key in `.env`.
-2. `docker compose up -d` to start MLflow + Postgres + MinIO + Prometheus + Grafana.
+2. `docker compose pull` then `docker compose up -d` to start MLflow + Postgres + MinIO + Prometheus + Grafana.
 3. `pip install -e .` to install the project.
 4. `uvicorn src.assistant.service:app --reload` to start the assistant.
 5. `python -m src.eval --config v1` to run the baseline eval. Open MLflow UI at http://localhost:5000 and look at per-category accuracy and cost. On a full eval, the run is auto-registered under Models → `travel-assistant`.

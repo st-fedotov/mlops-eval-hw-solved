@@ -34,9 +34,12 @@ cd mlops-eval-hw-solved
 cp .env.example .env
 # Open .env and paste your NEBIUS_API_KEY
 
-# 3. Start the infrastructure stack
+# 3. Pull the infrastructure images and start the stack
+docker compose pull
 docker compose up -d
 # Brings up MLflow + Postgres + MinIO + Prometheus + Grafana. Wait ~30 sec.
+# `pull` is split out from `up` so any registry / network failures surface
+# explicitly instead of being buried in startup output.
 
 # 4. Install Python deps (use a virtualenv)
 python -m venv .venv

@@ -1,0 +1,54 @@
+name: Mirror images to GHCR
+
+# Mirrors Docker Hub images that students consistently struggle to pull
+# (Hub's CloudFront CDN is unreliable from some regions). The workflow runs
+# on GitHub's infrastructure, which has clean Hub access, and re-publishes
+# to ghcr.io under this repository's namespace. The compose file references
+# the ghcr.io paths so students don't depend on a working Hub connection.
+#
+# How to use:
+# 1. Run the workflow once manually from the Actions tab (Run workflow button)
+#    after first pushing this file. The schedule keeps mirrors fresh weekly.
+# 2. After the first run, the packages exist but default to PRIVATE.
+#    Make them public so unauthenticated pulls work:
+#      https://github.com/users/<owner>/packages -> package settings ->
+#      Change visibility -> Public.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Sunday 06:00 UTC; keeps `latest` tags within a week of upstream.
+    - cron: "0 6 * * 0"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add more entries here if other Hub images become unreliable.
+        # source = upstream Docker Hub reference; target = ghcr.io path component.
+        include:
+          - source: grafana/grafana:latest
+            target: mlops-grafana:latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull, retag, push
+        run: |
+          set -euo pipefail
+          SOURCE="${{ matrix.source }}"
+          TARGET="ghcr.io/${{ github.repository_owner }}/${{ matrix.target }}"
+          docker pull "$SOURCE"
+          docker tag  "$SOURCE" "$TARGET"
+          docker push "$TARGET"
+          echo "Mirrored $SOURCE -> $TARGET"

@@ -183,6 +183,14 @@ The dev loop:
 
 Full task description: [`docs/README.md`](docs/README.md). Reference solution walkthrough: [`docs/reference_solution.md`](docs/reference_solution.md). Serverless v2 sketch: [`docs/serverless.md`](docs/serverless.md).
 
+## Image mirror
+
+Docker Hub's CloudFront CDN drops blob downloads mid-stream from some regions, which makes pulling `grafana/grafana:latest` unreliable for students. To insulate the stack from this, the Grafana image is mirrored to this repo's GitHub Container Registry namespace by `.github/workflows/mirror-images.yml`, and `docker-compose.yml` references the GHCR path. Students don't need to touch Docker Hub at all.
+
+For the repo owner: after first push, run the *Mirror images to GHCR* workflow once from the Actions tab; then go to https://github.com/users/&lt;owner&gt;/packages, open `mlops-grafana`, *Package settings → Change visibility → Public*. The scheduled run keeps the mirror within a week of upstream `latest`.
+
+If you find another Hub image starts failing for students, add it to the `matrix.include` list in the workflow file (source + target name), re-run the workflow, make the new package public, and update its image reference in `docker-compose.yml`.
+
 ## Secrets
 
 Your Nebius API key is yours. Never commit it; never paste it into a chat, issue, or screenshot.

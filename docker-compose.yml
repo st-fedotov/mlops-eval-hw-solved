@@ -77,7 +77,10 @@ services:
       - "host.docker.internal:host-gateway"
 
   grafana:
-    image: grafana/grafana:latest
+    # Pulled from this repo's GHCR mirror — Docker Hub's CloudFront edge is
+    # unreliable from some regions for the grafana/grafana image. The mirror
+    # is maintained by .github/workflows/mirror-images.yml.
+    image: ghcr.io/st-fedotov/mlops-grafana:latest
     restart: unless-stopped
     depends_on:
       - prometheus

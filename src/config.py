@@ -10,8 +10,14 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Push .env values into os.environ so libraries that read the environment
+# directly (mlflow client, boto3, etc.) see the same values that
+# pydantic-settings reads via env_file. No effect when .env is absent.
+load_dotenv()
 
 
 class Settings(BaseSettings):

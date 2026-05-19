@@ -187,7 +187,7 @@ Worked example: suppose you've just iterated on `configs/v4.yaml`, run a full ev
 
 1. **Iterate.** Edit `configs/v4.yaml` or its prompts in dev mode (`ASSISTANT_CONFIG=v4`). Test by sending `/chat` traffic to the running service.
 2. **Eval.** `python -m src.eval --config v4`. The eval logs to MLflow and, because there's no `--limit`, auto-registers the run. Note the reported version number — say it's `7`.
-3. **Review.** Open MLflow UI: http://localhost:5000 → **Models** tab → click `travel-assistant`. Click **Version 7** to see its metrics, parameters, and artifacts. Check that `accuracy_overall`, `verdict_rate_leaked`, `total_cost_usd` clear whatever bar you've set.
+3. **Review.** Open MLflow UI: http://localhost:5000 → **Models** tab → click `travel-assistant`. Each version is tagged at registration time with `config_id`, `model`, `guardrail_type`, `judge_model`, and `dataset_size`, and has a one-line description summarizing accuracy / leakage / cost — so you can pick out "the v4 run" without remembering integer numbers. Click into Version 7 to see its full metrics, parameters, and artifacts. Check that `accuracy_overall`, `verdict_rate_leaked`, `total_cost_usd` clear whatever bar you've set.
 4. **Promote.** If version 7 is good, assign the `Production` alias to it. Two ways:
    - **UI:** on the Version 7 page, scroll to *Aliases* → click **+ Add alias** → type `Production` → enter.
    - **Python one-liner** (from the repo root):
@@ -206,6 +206,23 @@ python -c "from mlflow.tracking import MlflowClient; MlflowClient().set_register
 ```
 
 Or in the UI: open Version 6 → *+ Add alias* → `Production` (this moves the alias off Version 7 onto Version 6). Restart uvicorn; the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
+
+### What's currently in Production?
+
+Three ways to check, depending on what you mean by "currently":
+
+**Registry state — what version does the `Production` alias point at right now.** Open MLflow UI → **Models** → `travel-assistant`. The row with a `Production` badge is the current target. Its tags tell you `config_id`, `model`, `guardrail_type`. Or one-line from Python:
+
+```powershell
+python -c "from mlflow.tracking import MlflowClient; mv = MlflowClient().get_model_version_by_alias('travel-assistant', 'Production'); print(f'version={mv.version} config_id={mv.tags.get(\"config_id\")} model={mv.tags.get(\"model\")} guardrail={mv.tags.get(\"guardrail_type\")}')"
+```
+
+**Service state — what the running uvicorn is actually serving.** Can differ from the Registry if you've reassigned the alias but haven't restarted uvicorn yet (config is bound at startup; aliases are re-resolved only on restart). Two ways:
+
+- Grafana → *Current deployment* panel (a table rendered from the `assistant_info` metric).
+- Or directly from the service: `curl http://localhost:8000/metrics | Select-String assistant_info`. The labels `config_id`, `model_alias`, `model_version` show what the lifespan loaded.
+
+**Health check.** `curl http://localhost:8000/health` just returns `{"status":"ok"}` — it doesn't tell you which config is loaded. Use `/metrics` for that.
 
 ### Integrity guarantee
 

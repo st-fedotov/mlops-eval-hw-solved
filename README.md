@@ -188,34 +188,19 @@ Worked example: suppose you've just iterated on `configs/v4.yaml`, run a full ev
 1. **Iterate.** Edit `configs/v4.yaml` or its prompts in dev mode (`ASSISTANT_CONFIG=v4`). Test by sending `/chat` traffic to the running service.
 2. **Eval.** `python -m src.eval --config v4`. The eval logs to MLflow and, because there's no `--limit`, auto-registers the run. Note the reported version number — say it's `7`.
 3. **Review.** Open MLflow UI: http://localhost:5000 → **Models** tab → click `travel-assistant`. Each version is tagged at registration time with `config_id`, `model`, `guardrail_type`, `judge_model`, and `dataset_size`, and has a one-line description summarizing accuracy / leakage / cost — so you can pick out "the v4 run" without remembering integer numbers. Click into Version 7 to see its full metrics, parameters, and artifacts. Check that `accuracy_overall`, `verdict_rate_leaked`, `total_cost_usd` clear whatever bar you've set.
-4. **Promote.** If version 7 is good, assign the `Production` alias to it. Two ways:
-   - **UI:** on the Version 7 page, scroll to *Aliases* → click **+ Add alias** → type `Production` → enter.
-   - **Python one-liner** (from the repo root):
-     ```powershell
-     python -c "from mlflow.tracking import MlflowClient; MlflowClient().set_registered_model_alias('travel-assistant', 'Production', 7)"
-     ```
+4. **Promote.** If version 7 is good, assign the `Production` alias to it via the UI: open the Version 7 page → *Aliases* section → **+ Add alias** → type `Production` → enter. Note that MLflow lowercases alias names on save, so what you typed as `Production` will appear as `@production` — and your `.env` should match: `ASSISTANT_MODEL_ALIAS=production`.
 5. **Deploy.** Set `ASSISTANT_MODEL_ALIAS=Production` in `.env` and restart uvicorn. On startup the service resolves the alias, downloads version 7's `config.json`, and runs it.
 6. **(Future) Drift check.** The cron'd golden-set replay in `docs/serverless.md` re-runs the eval dataset against the deployed version on a schedule. If new metrics diverge from version 7's original eval, you've caught upstream drift.
 
 ### Rollback
 
-One alias update plus a service restart. If version 7 turns out badly in production and version 6 was the previous good one:
-
-```powershell
-python -c "from mlflow.tracking import MlflowClient; MlflowClient().set_registered_model_alias('travel-assistant', 'Production', 6)"
-```
-
-Or in the UI: open Version 6 → *+ Add alias* → `Production` (this moves the alias off Version 7 onto Version 6). Restart uvicorn; the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
+One alias update plus a service restart. If version 7 turns out badly in production and version 6 was the previous good one: open Version 6 in the MLflow UI → *+ Add alias* → `Production`. This moves the alias off Version 7 onto Version 6 (each alias points at exactly one version at a time). Restart uvicorn; the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
 
 ### What's currently in Production?
 
 Three ways to check, depending on what you mean by "currently":
 
-**Registry state — what version does the `Production` alias point at right now.** Open MLflow UI → **Models** → `travel-assistant`. The row with a `Production` badge is the current target. Its tags tell you `config_id`, `model`, `guardrail_type`. Or one-line from Python:
-
-```powershell
-python -c "from mlflow.tracking import MlflowClient; mv = MlflowClient().get_model_version_by_alias('travel-assistant', 'Production'); print(f'version={mv.version} config_id={mv.tags.get(\"config_id\")} model={mv.tags.get(\"model\")} guardrail={mv.tags.get(\"guardrail_type\")}')"
-```
+**Registry state — what version does the `production` alias point at right now.** Open MLflow UI → **Models** → `travel-assistant`. The row with a `@production` badge is the current target. Its tags tell you `config_id`, `model`, `guardrail_type`.
 
 **Service state — what the running uvicorn is actually serving.** Can differ from the Registry if you've reassigned the alias but haven't restarted uvicorn yet (config is bound at startup; aliases are re-resolved only on restart). Two ways:
 
@@ -323,6 +308,23 @@ Docker Hub's CloudFront CDN drops blob downloads mid-stream from some regions, w
 For the repo owner: after first push, run the *Mirror images to GHCR* workflow once from the Actions tab; then go to https://github.com/users/&lt;owner&gt;/packages, open `mlops-grafana`, *Package settings → Change visibility → Public*. The scheduled run keeps the mirror within a week of upstream `latest`.
 
 If you find another Hub image starts failing for students, add it to the `matrix.include` list in the workflow file (source + target name), re-run the workflow, make the new package public, and update its image reference in `docker-compose.yml`.
+
+## Updating after `git pull`
+
+You almost never need `docker compose down`. Containers and named volumes (MLflow DB, MinIO artifacts) stay alive across pulls; you just restart whatever has new code or config. The 90% case after `git pull` is **either nothing or one `docker compose up -d`**, not a full teardown.
+
+| What changed in the repo | What to do |
+|---|---|
+| `src/**/*.py` (Python source) | If uvicorn is running with `--reload`: nothing — it auto-reloads. Otherwise `Ctrl+C` and re-run uvicorn. |
+| `configs/*.yaml`, `prompts/*.txt`, or values in `.env` (e.g., flipping `ASSISTANT_CONFIG` or `ASSISTANT_MODEL_ALIAS`) | Restart uvicorn (`Ctrl+C` then re-run). The lifespan binds the config at startup; `--reload` does NOT re-run the lifespan, so this is a manual restart. |
+| `docker-compose.yml` (new service, env, port, build context, …) | `docker compose up -d`. Compose diffs the running stack against the new file and only recreates services that actually changed. Untouched containers keep running. |
+| Image tag in compose changed, or you want the freshest `:latest` | `docker compose pull` then `docker compose up -d`. |
+| `observability/grafana/dashboards/*.json` | Nothing. Grafana's provisioner re-reads the dashboards directory every 10 seconds. |
+| `observability/prometheus.yml` or Grafana datasource/provisioning yaml | `docker compose restart prometheus` (or `restart grafana`). The volume mount is live but the process needs to re-read the file. |
+| `Dockerfile` or anything that affects an image *built* by compose (e.g., `docker/mlflow.Dockerfile`) | `docker compose build` then `docker compose up -d`. |
+| You really want a clean slate | `docker compose down && docker compose up -d`. Volumes survive. Add `-v` to `down` to also drop volumes (loses your MLflow DB and MinIO artifacts — only do this for a full reset). |
+
+Quick mental shortcut: **Python change → uvicorn restart. Compose change → `compose up -d`. Config-file-mounted-to-running-container change → `compose restart <service>`.**
 
 ## Secrets
 

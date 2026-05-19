@@ -17,25 +17,139 @@ The base system prompt says: *answer travel questions, refuse everything else.* 
 - `docker-compose.yml` — MLflow (Postgres + MinIO) + Prometheus + Grafana.
 - `docs/` — full task description, reference solution, serverless v2 sketch.
 
-## Quick start
+## Prerequisites
+
+- Docker Desktop (or another Docker-compatible runtime; the stack uses five containers).
+- Python 3.11+.
+- A Nebius Token Factory API key — create one at https://studio.nebius.com/.
+
+## Setup from scratch
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/st-fedotov/mlops-eval-hw-solved.git
+cd mlops-eval-hw-solved
+
+# 2. Configure secrets
 cp .env.example .env
-# Fill in NEBIUS_API_KEY in .env
+# Open .env and paste your NEBIUS_API_KEY
 
-docker compose up -d                                # MLflow, Postgres, MinIO, Prometheus, Grafana
+# 3. Start the infrastructure stack
+docker compose up -d
+# Brings up MLflow + Postgres + MinIO + Prometheus + Grafana. Wait ~30 sec.
 
+# 4. Install Python deps (use a virtualenv)
+python -m venv .venv
+# Activate it:
+#   PowerShell:   .venv\Scripts\Activate.ps1
+#   Windows cmd:  .venv\Scripts\activate.bat
+#   Linux/macOS:  source .venv/bin/activate
 pip install -e .
-uvicorn src.assistant.service:app --reload         # the assistant on :8000
-python -m src.eval --variant v1                    # offline eval -> MLflow
+
+# 5. Start the assistant service (default variant: v1)
+uvicorn src.assistant.service:app --reload
+# Service is now at http://localhost:8000
 ```
 
-Open:
-- MLflow UI: http://localhost:5000
-- Grafana:   http://localhost:3000 (anonymous Viewer; admin/admin for edit)
-- Prometheus: http://localhost:9090
+## Sending a message
 
-Full task description: [`docs/README.md`](docs/README.md). Reference solution walkthrough: [`docs/reference_solution.md`](docs/reference_solution.md).
+In a second shell, with the service running:
+
+```bash
+# Plain curl
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Find flights from Paris to Rome"}'
+```
+
+PowerShell equivalent:
+
+```powershell
+Invoke-RestMethod -Method POST -Uri http://localhost:8000/chat `
+  -ContentType "application/json" `
+  -Body '{"message": "Find flights from Paris to Rome"}'
+```
+
+Or use the included helper:
+
+```bash
+python scripts/chat.py "Find flights from Paris to Rome"
+python scripts/chat.py --raw "Tell me a joke"          # full JSON response
+```
+
+A typical response:
+
+```json
+{
+  "text": "I'd be happy to help you find flights from Paris to Rome ...",
+  "refused": false,
+  "input_category": null,
+  "output_verdict": null,
+  "model_calls": [
+    {"model": "meta-llama/Meta-Llama-3.1-8B-Instruct", "role": "main_assistant",
+     "input_tokens": 47, "output_tokens": 312, "latency_seconds": 2.1}
+  ]
+}
+```
+
+`refused`, `input_category`, `output_verdict` are the monitoring signals — they drive the Prometheus metrics under the hood. `input_category` is `null` for variants without an input classifier; `output_verdict` is `null` for variants without an output validator.
+
+## Choosing a variant at deployment
+
+Which variant the service runs is chosen at startup time via the `VARIANT` env var (default: `v1`). Each variant in `variants.yaml` fully describes one deployment: main model, system prompt, guardrail architecture.
+
+```bash
+# v2 — positive-list scope + canned refusal string
+VARIANT=v2 uvicorn src.assistant.service:app --reload
+
+# v4 — input classifier in front of the main assistant
+VARIANT=v4 uvicorn src.assistant.service:app --reload
+
+# v5 — input classifier + output validator (sandwich)
+VARIANT=v5 uvicorn src.assistant.service:app --reload
+```
+
+Or set it persistently in `.env`:
+
+```
+VARIANT=v4
+```
+
+Variant is bound at startup. To switch, stop the service (`Ctrl+C`) and re-run with a different `VARIANT`. There is no hot-swap — intentional, because Prometheus labels (and so the Grafana dashboards) carry `variant_id` as a dimension and a series should belong to one deployment.
+
+## Running an offline eval
+
+```bash
+# Full eval against the 100-example dataset (~10–20 min depending on variant)
+python -m src.eval --variant v1
+
+# Quick check while developing
+python -m src.eval --variant v4 --limit 25
+```
+
+Each invocation is a new MLflow run. Open the MLflow UI and compare runs side-by-side: per-category accuracy, refusal rates, total cost, latency, full per-example predictions as a downloadable artifact.
+
+## UIs
+
+| URL | What it shows |
+|-----|---------------|
+| http://localhost:5000 | MLflow tracking server — compare eval runs across variants |
+| http://localhost:3000 | Grafana — the *Travel Assistant — Live Monitoring* dashboard (anonymous Viewer; admin/admin to edit) |
+| http://localhost:9090 | Prometheus — raw metrics + PromQL query UI |
+| http://localhost:8000/metrics | Prometheus exposition straight from the assistant service |
+| http://localhost:8000/health | Liveness check |
+
+## Iterating on variants
+
+The dev loop:
+
+1. Edit `variants.yaml` — add a new variant block, change a model, swap a guardrail config.
+2. Edit prompts in `prompts/` if you're changing system or classifier prompts.
+3. Stop the service (`Ctrl+C`) and re-run `uvicorn` with the new `VARIANT`.
+4. `python -m src.eval --variant <new>` — new MLflow run.
+5. Compare in MLflow UI; iterate.
+
+Full task description: [`docs/README.md`](docs/README.md). Reference solution walkthrough: [`docs/reference_solution.md`](docs/reference_solution.md). Serverless v2 sketch: [`docs/serverless.md`](docs/serverless.md).
 
 ## Secrets
 

@@ -148,20 +148,51 @@ Each invocation is a new MLflow run. On full evals (no `--limit`), the run's `co
 
 ## The eval → deploy flow
 
-1. Iterate on `configs/<your_config>.yaml` and the prompts it references in dev mode (`ASSISTANT_CONFIG=your_config`).
-2. When a config looks good, run a full eval: `python -m src.eval --config your_config`.
-3. The eval auto-registers the result as a new version of `travel-assistant` and prints `registered: travel-assistant vN`. The same version is visible in the MLflow UI under Models.
-4. Review version N's metrics. If it meets your bar (e.g. `accuracy_overall >= 0.9`, `verdict_rate_leaked <= 0.02`, `total_cost_usd <= $X`), **promote** it by assigning the `Production` alias:
-   ```
-   mlflow models set-alias travel-assistant Production N
-   ```
-   Or via UI: open version N → *Set alias* → `Production`.
-5. Restart the service. It re-resolves the alias and picks up the new version.
-6. (Future) The cron'd golden-set replay in `docs/serverless.md` re-runs the same dataset against the deployed version on a schedule. If metrics diverge from the original eval, you've caught upstream drift.
+### How Registry versions are numbered
 
-**Rollback** is one alias update plus a restart: `mlflow models set-alias travel-assistant Production N-1`. The previous version is a config that *already passed eval*; no risk of shipping something unmeasured.
+Every full `python -m src.eval` invocation auto-creates a new version under the *registered model* `travel-assistant`. Versions are plain integers — `1`, `2`, `3`, … — auto-assigned by MLflow at registration time. You don't choose the number.
 
-This is the integrity guarantee. The `configs/` directory is a development scratchpad. Versions in the Registry are immutable; aliases are mutable but their reassignment is an audited event. The deployment lineage from a Grafana spike runs: `model_name` + `model_alias` + `model_version` label → MLflow version → source run → measured metrics + exact prompts.
+The numbering is **per registered-model-name, not per config**. If you eval `v1` first and then `v4`, MLflow assigns version `1` to the v1 run and version `2` to the v4 run, under the same `travel-assistant` registered model. Re-evaluating `v1` later would produce version `3`. Each version is an immutable snapshot of one specific eval; the `config_id` it came from is stored as a parameter on that version, but it doesn't drive the integer.
+
+The eval's terminal output shows the assigned number on the `registered:` line:
+
+```
+=== v1 eval summary ===
+  run_id:              4058ca6c137344619c4fd65bb909f9c9
+  registered:          travel-assistant v1    <-- "v1" here means version 1 of travel-assistant
+  accuracy_overall:    0.750
+  ...
+```
+
+### Step by step
+
+Worked example: suppose you've just iterated on `configs/v4.yaml`, run a full eval, and the terminal reports `registered: travel-assistant v7`. (Version 7 means six prior evals had already been registered on this MLflow server.)
+
+1. **Iterate.** Edit `configs/v4.yaml` or its prompts in dev mode (`ASSISTANT_CONFIG=v4`). Test by sending `/chat` traffic to the running service.
+2. **Eval.** `python -m src.eval --config v4`. The eval logs to MLflow and, because there's no `--limit`, auto-registers the run. Note the reported version number — say it's `7`.
+3. **Review.** Open MLflow UI: http://localhost:5000 → **Models** tab → click `travel-assistant`. Click **Version 7** to see its metrics, parameters, and artifacts. Check that `accuracy_overall`, `verdict_rate_leaked`, `total_cost_usd` clear whatever bar you've set.
+4. **Promote.** If version 7 is good, assign the `Production` alias to it. Two ways:
+   - **UI:** on the Version 7 page, scroll to *Aliases* → click **+ Add alias** → type `Production` → enter.
+   - **Python one-liner** (from the repo root):
+     ```powershell
+     python -c "from mlflow.tracking import MlflowClient; MlflowClient().set_registered_model_alias('travel-assistant', 'Production', 7)"
+     ```
+5. **Deploy.** Set `ASSISTANT_MODEL_ALIAS=Production` in `.env` and restart uvicorn. On startup the service resolves the alias, downloads version 7's `config.json`, and runs it.
+6. **(Future) Drift check.** The cron'd golden-set replay in `docs/serverless.md` re-runs the eval dataset against the deployed version on a schedule. If new metrics diverge from version 7's original eval, you've caught upstream drift.
+
+### Rollback
+
+One alias update plus a service restart. If version 7 turns out badly in production and version 6 was the previous good one:
+
+```powershell
+python -c "from mlflow.tracking import MlflowClient; MlflowClient().set_registered_model_alias('travel-assistant', 'Production', 6)"
+```
+
+Or in the UI: open Version 6 → *+ Add alias* → `Production` (this moves the alias off Version 7 onto Version 6). Restart uvicorn; the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
+
+### Integrity guarantee
+
+The `configs/` directory is a development scratchpad. Versions in the Registry are immutable — version 7 always means what version 7 meant the moment you registered it, even if you later edit `configs/v4.yaml` on disk. Aliases are mutable but their reassignment is an audited event in MLflow. The deployment lineage from a Grafana spike runs: `model_name` + `model_alias` + `model_version` label → MLflow version → source run → measured metrics + exact prompts.
 
 ## UIs
 

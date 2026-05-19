@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     mlflow_registered_model_name: str = "travel-assistant"
     assistant_model_alias: str | None = None
 
+    # Admin-endpoint auth. When set, POST /admin/reload requires an
+    # `X-Admin-Token` header matching this value. Unset = open in dev.
+    admin_token: SecretStr | None = None
+
     # Judge — orthogonal to assistant configs
     judge_model: str = "meta-llama/Llama-3.3-70B-Instruct"
     judge_temperature: float = 0.0

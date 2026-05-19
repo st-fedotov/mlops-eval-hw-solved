@@ -189,12 +189,44 @@ Worked example: suppose you've just iterated on `configs/v4.yaml`, run a full ev
 2. **Eval.** `python -m src.eval --config v4`. The eval logs to MLflow and, because there's no `--limit`, auto-registers the run. Note the reported version number — say it's `7`.
 3. **Review.** Open MLflow UI: http://localhost:5000 → **Models** tab → click `travel-assistant`. Each version is tagged at registration time with `config_id`, `model`, `guardrail_type`, `judge_model`, and `dataset_size`, and has a one-line description summarizing accuracy / leakage / cost — so you can pick out "the v4 run" without remembering integer numbers. Click into Version 7 to see its full metrics, parameters, and artifacts. Check that `accuracy_overall`, `verdict_rate_leaked`, `total_cost_usd` clear whatever bar you've set.
 4. **Promote.** If version 7 is good, assign the `Production` alias to it via the UI: open the Version 7 page → *Aliases* section → **+ Add alias** → type `Production` → enter. Note that MLflow lowercases alias names on save, so what you typed as `Production` will appear as `@production` — and your `.env` should match: `ASSISTANT_MODEL_ALIAS=production`.
-5. **Deploy.** Set `ASSISTANT_MODEL_ALIAS=Production` in `.env` and restart uvicorn. On startup the service resolves the alias, downloads version 7's `config.json`, and runs it.
+5. **Deploy.** Set `ASSISTANT_MODEL_ALIAS=production` in `.env` and restart uvicorn. On startup the service resolves the alias, downloads version 7's `config.json`, and runs it. For deploys after the first one, see *Hot-reload without restart* below — you don't need to bounce the service every time you reassign an alias.
 6. **(Future) Drift check.** The cron'd golden-set replay in `docs/serverless.md` re-runs the eval dataset against the deployed version on a schedule. If new metrics diverge from version 7's original eval, you've caught upstream drift.
+
+### Hot-reload without restart
+
+Restarting uvicorn for every alias swap is fine in dev but unacceptable in production — there's a brief window where the service isn't serving. Instead, the service exposes `POST /admin/reload`. It re-resolves the current `ASSISTANT_MODEL_ALIAS` against the Registry, downloads the new version's `config.json`, builds a fresh `Pipeline`, and atomically swaps it into `app.state.pipeline`. In-flight `/chat` requests finish on the previous pipeline; new requests pick up the new one. No downtime.
+
+Usage:
+
+```powershell
+Invoke-RestMethod -Method POST http://localhost:8000/admin/reload
+```
+
+Response (200, ~1–2 seconds — the time of the Registry fetch and prompt download):
+
+```json
+{
+  "status": "ok",
+  "previous": {"config_id": "v4", "model_version": "7", ...},
+  "current":  {"config_id": "v5", "model_version": "8", ...}
+}
+```
+
+If anything fails during resolution or build — Registry unreachable, alias not set, artifact corrupt, manifest fails pydantic validation — the endpoint returns 500 and the running pipeline is untouched. Existing `/chat` traffic keeps working on the prior version.
+
+**Security.** `/admin/reload` is admin surface. Gate it via `ADMIN_TOKEN` in `.env`:
+
+```
+ADMIN_TOKEN=<random hex from `openssl rand -hex 32`>
+```
+
+When set, every call must carry an `X-Admin-Token: <value>` header or it gets a 403. When unset (dev default), the endpoint is open. In production this should always be set; in front of a real LB/proxy you'd additionally restrict the endpoint to internal callers.
+
+The reload also works in **dev mode** (when `ASSISTANT_MODEL_ALIAS` is unset): it re-reads `configs/<ASSISTANT_CONFIG>.yaml` from disk and rebuilds. Useful when iterating on prompts — no need to `Ctrl+C` uvicorn each time you save a file.
 
 ### Rollback
 
-One alias update plus a service restart. If version 7 turns out badly in production and version 6 was the previous good one: open Version 6 in the MLflow UI → *+ Add alias* → `Production`. This moves the alias off Version 7 onto Version 6 (each alias points at exactly one version at a time). Restart uvicorn; the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
+One alias update plus a hot reload. If version 7 turns out badly in production and version 6 was the previous good one: open Version 6 in the MLflow UI → *+ Add alias* → `Production`. This moves the alias off Version 7 onto Version 6 (each alias points at exactly one version at a time). Then `Invoke-RestMethod -Method POST http://localhost:8000/admin/reload` (or restart uvicorn if you'd rather); the service now serves version 6. Version 6 was a config that *already passed eval*, so you can't accidentally ship something unmeasured.
 
 ### What's currently in Production?
 
@@ -316,7 +348,9 @@ You almost never need `docker compose down`. Containers and named volumes (MLflo
 | What changed in the repo | What to do |
 |---|---|
 | `src/**/*.py` (Python source) | If uvicorn is running with `--reload`: nothing — it auto-reloads. Otherwise `Ctrl+C` and re-run uvicorn. |
-| `configs/*.yaml`, `prompts/*.txt`, or values in `.env` (e.g., flipping `ASSISTANT_CONFIG` or `ASSISTANT_MODEL_ALIAS`) | Restart uvicorn (`Ctrl+C` then re-run). The lifespan binds the config at startup; `--reload` does NOT re-run the lifespan, so this is a manual restart. |
+| `configs/*.yaml` or `prompts/*.txt` (you're iterating on a prompt/config in dev mode) | `Invoke-RestMethod -Method POST http://localhost:8000/admin/reload` — re-reads the active config from disk and atomically swaps the pipeline. No uvicorn restart needed. |
+| Flipping `ASSISTANT_CONFIG` or `ASSISTANT_MODEL_ALIAS` in `.env`, or any other env var that pydantic-settings reads | Restart uvicorn (`Ctrl+C` then re-run). Settings is cached at first import; new env values need a fresh process. |
+| MLflow Registry alias reassignment (`production` → different version) | `Invoke-RestMethod -Method POST http://localhost:8000/admin/reload` — re-resolves the alias and swaps. No restart. |
 | `docker-compose.yml` (new service, env, port, build context, …) | `docker compose up -d`. Compose diffs the running stack against the new file and only recreates services that actually changed. Untouched containers keep running. |
 | Image tag in compose changed, or you want the freshest `:latest` | `docker compose pull` then `docker compose up -d`. |
 | `observability/grafana/dashboards/*.json` | Nothing. Grafana's provisioner re-reads the dashboards directory every 10 seconds. |

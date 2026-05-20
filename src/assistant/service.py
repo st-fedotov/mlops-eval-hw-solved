@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.assistant import AssistantResponse, Pipeline, build_pipeline
 from src.config import get_settings
 from src.configs import load_config, load_config_from_registry
-from src.constants import cost_usd
+from src.pricing import cost_usd
 from src.monitoring.judge_worker import JudgeWorker
 from src.monitoring.metrics import (
     assistant_info,

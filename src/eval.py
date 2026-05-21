@@ -27,6 +27,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 import mlflow
+import numpy as np
 
 from src.assistant import build_pipeline
 from src.assistant.types import AssistantResponse
@@ -118,14 +119,26 @@ def _compute_metrics(rows: list[dict]) -> dict[str, float]:
         metrics[f"refusal_rate_{cat}"] = refused_by_cat[cat] / total
 
     for verdict, count in Counter(r["judge_verdict"] for r in rows).items():
-        metrics[f"verdict_count_{verdict}"] = float(count)
+        metrics[f"judge_evaluations_total_{verdict}"] = float(count)
         metrics[f"verdict_rate_{verdict}"] = count / n
 
     total_cost = sum(r["total_cost_usd"] + r["judge_cost_usd"] for r in rows)
     metrics["total_cost_usd"] = total_cost
     metrics["avg_cost_per_request_usd"] = total_cost / n
-    metrics["avg_latency_seconds"] = sum(r["total_latency_seconds"] for r in rows) / n
     metrics["avg_calls_per_request"] = sum(r["n_calls"] for r in rows) / n
+
+    latencies = [r["total_latency_seconds"] for r in rows]
+    metrics["avg_latency_seconds"] = sum(latencies) / n
+    metrics["request_latency_p50_seconds"] = float(np.percentile(latencies, 50))
+    metrics["request_latency_p95_seconds"] = float(np.percentile(latencies, 95))
+
+    in_toks = [r["total_input_tokens"] for r in rows]
+    out_toks = [r["total_output_tokens"] for r in rows]
+    metrics["total_input_tokens"] = float(sum(in_toks))
+    metrics["mean_input_tokens"] = sum(in_toks) / n
+    metrics["total_output_tokens"] = float(sum(out_toks))
+    metrics["mean_output_tokens"] = sum(out_toks) / n
+
     return metrics
 
 

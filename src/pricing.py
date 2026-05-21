@@ -1,80 +1,86 @@
 """Per-model token pricing.
 
-Loads the price table from `prices.yaml` at the repo root and exposes
-`cost_usd(model, input_tokens, output_tokens)` for computing per-completion
-cost.
+Fetches per-token rates from Nebius Token Factory's verbose models endpoint
+(`GET /v1/models?verbose=true`). The response includes a `pricing` object
+with `prompt` and `completion` rates expressed as USD per single token; this
+module multiplies token counts directly without unit conversion.
 
-Nebius Token Factory does not expose per-token rates via a programmatic API
-(no public pricing endpoint; operator-facing rates UI is auth-gated), so the
-table is hand-maintained. See `prices.yaml` for verification procedure and
-last-verified date.
+The fetch is lazy and cached for the lifetime of the process via lru_cache.
+The first call to `cost_usd(...)` triggers one HTTP round-trip; subsequent
+calls hit the in-process cache. If the fetch fails (network, bad key, etc.),
+the module logs an error and returns 0 for every model — the same degraded
+behavior as the previous YAML-backed implementation when prices.yaml was
+missing.
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from functools import lru_cache
 
-import yaml
+import httpx
+
+from src.config import get_settings
 
 log = logging.getLogger(__name__)
-
-
-_PRICES_FILE = Path(__file__).resolve().parent.parent / "prices.yaml"
-
-
-def _load_prices() -> dict[str, tuple[float, float]]:
-    """Load per-model USD prices from prices.yaml. Returns a mapping from
-    model id to (input_per_1m_usd, output_per_1m_usd). Empty dict if the
-    file is missing, unreadable, or malformed — never raises at import."""
-    if not _PRICES_FILE.exists():
-        log.warning(
-            "prices.yaml not found at %s; cost will be 0 for all models.",
-            _PRICES_FILE,
-        )
-        return {}
-    try:
-        with open(_PRICES_FILE, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except yaml.YAMLError as exc:
-        log.error(
-            "Failed to parse prices.yaml: %s. Cost will be 0 for all models.",
-            exc,
-        )
-        return {}
-    out: dict[str, tuple[float, float]] = {}
-    for row in data.get("prices") or []:
-        try:
-            out[row["model"]] = (
-                float(row["input_per_1m_usd"]),
-                float(row["output_per_1m_usd"]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            log.error(
-                "Skipping malformed entry in prices.yaml: %r (%s)", row, exc
-            )
-    return out
-
-
-MODEL_PRICES_USD_PER_1M: dict[str, tuple[float, float]] = _load_prices()
 
 
 # Models we've already warned about, to avoid one log line per request.
 _warned_models: set[str] = set()
 
 
+@lru_cache(maxsize=1)
+def _get_prices() -> dict[str, tuple[float, float]]:
+    """Fetch per-model (prompt, completion) per-token USD rates from Nebius.
+
+    Returns an empty dict on any fetch or parse failure. Cached per process;
+    call `_get_prices.cache_clear()` to force a refresh.
+    """
+    settings = get_settings()
+    url = settings.nebius_base_url.rstrip("/") + "/models"
+    headers = {"Authorization": f"Bearer {settings.nebius_api_key.get_secret_value()}"}
+    try:
+        resp = httpx.get(
+            url,
+            params={"verbose": "true"},
+            headers=headers,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log.error(
+            "Failed to fetch model pricing from Nebius (%s); cost will be 0 "
+            "for all models this process.",
+            exc,
+        )
+        return {}
+
+    out: dict[str, tuple[float, float]] = {}
+    for m in data.get("data", []):
+        pricing = m.get("pricing") or {}
+        try:
+            prompt = float(pricing.get("prompt"))
+            completion = float(pricing.get("completion"))
+        except (TypeError, ValueError):
+            continue
+        out[m["id"]] = (prompt, completion)
+    return out
+
+
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     """USD cost for one completion. Returns 0.0 (with a one-shot warning) if
-    the model is not priced in prices.yaml — add a row to fix."""
-    prices = MODEL_PRICES_USD_PER_1M.get(model)
-    if prices is None:
+    Nebius didn't return pricing for this model."""
+    prices = _get_prices()
+    entry = prices.get(model)
+    if entry is None:
         if model not in _warned_models:
             log.warning(
-                "No price entry for model %r in prices.yaml. "
-                "Cost will be 0 for this model; add a row to fix.",
+                "No pricing returned by Nebius for model %r. Cost will be 0 "
+                "until the model is added to the Nebius catalog.",
                 model,
             )
             _warned_models.add(model)
         return 0.0
-    in_price, out_price = prices
-    return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
+    in_price, out_price = entry
+    return input_tokens * in_price + output_tokens * out_price

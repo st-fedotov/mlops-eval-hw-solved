@@ -1,15 +1,16 @@
 """Probe the Nebius Token Factory model catalog.
 
 Reads the API key from either the NEBIUS_API_KEY env var or a local
-`nebius_api_key` file (in that order). Prints model IDs to stdout; the
-key value is never logged.
+`mlops-hw-tf-api-key` file (in that order). The key value is never logged.
 
 Usage:
-    python scripts/list_models.py
+    python scripts/list_models.py             # one model id per line
+    python scripts/list_models.py --verbose   # also include pricing fields
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import pathlib
 import sys
@@ -22,7 +23,7 @@ def load_key() -> str:
     candidate = pathlib.Path("mlops-hw-tf-api-key")
     if not candidate.exists():
         print(
-            "No API key found. Set NEBIUS_API_KEY env var or create a `nebius_api_key` file.",
+            "No API key found. Set NEBIUS_API_KEY env var or create a `mlops-hw-tf-api-key` file.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -41,10 +42,46 @@ def load_key() -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Hit /models?verbose=true and include pricing fields in output",
+    )
+    args = parser.parse_args()
+
     key = load_key()
     base_url = os.environ.get(
         "NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1/"
     )
+
+    if args.verbose:
+        # OpenAI SDK's models.list() parses into Model objects that drop the
+        # pricing/context_length fields. Bypass the SDK for the verbose probe.
+        try:
+            import httpx
+        except ImportError:
+            print("Install httpx: pip install httpx", file=sys.stderr)
+            sys.exit(1)
+        url = base_url.rstrip("/") + "/models"
+        try:
+            resp = httpx.get(
+                url,
+                params={"verbose": "true"},
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"GET {url}?verbose=true failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        data = resp.json()
+        for m in data.get("data", []):
+            pricing = m.get("pricing", {}) or {}
+            print(
+                f"{m['id']}\tprompt={pricing.get('prompt')}\tcompletion={pricing.get('completion')}"
+            )
+        return
 
     try:
         from openai import OpenAI

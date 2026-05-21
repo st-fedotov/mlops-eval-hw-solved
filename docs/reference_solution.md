@@ -13,7 +13,7 @@ You are a travel assistant. Only answer questions about flights, hotels,
 visas, baggage, and travel planning. Politely refuse unrelated requests.
 ```
 
-Direct, vague. Expected behavior on Llama-3.1-8B:
+Direct, vague. Expected behavior on a small generic instruct model:
 
 - `accuracy_travel` is decent — the bot answers travel questions normally.
 - `accuracy_off_topic` is OK but not great — the model often hedges or starts answering before catching itself.

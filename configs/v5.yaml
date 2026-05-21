@@ -1,7 +1,7 @@
 display_name: "Sandwich (input + output validator)"
 description: "Input classifier in front + output validator behind. Defense in depth."
 model:
-  name: meta-llama/Meta-Llama-3.1-8B-Instruct
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
   temperature: 0.0
   max_tokens: 512
 system_prompt: prompts/v2_explicit_refusal.txt
@@ -9,13 +9,13 @@ guardrail:
   type: sandwich
   input_classifier:
     model:
-      name: meta-llama/Meta-Llama-3.1-8B-Instruct
+      name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
       temperature: 0.0
       max_tokens: 8
     prompt: prompts/classifier_input.txt
   output_validator:
     model:
-      name: meta-llama/Meta-Llama-3.1-8B-Instruct
+      name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
       temperature: 0.0
       max_tokens: 8
     prompt: prompts/classifier_output.txt

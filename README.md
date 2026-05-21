@@ -89,7 +89,7 @@ A typical response:
   "input_category": null,
   "output_verdict": null,
   "model_calls": [
-    {"model": "meta-llama/Meta-Llama-3.1-8B-Instruct", "role": "main_assistant",
+    {"model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B", "role": "main_assistant",
      "input_tokens": 47, "output_tokens": 312, "latency_seconds": 2.1}
   ]
 }
